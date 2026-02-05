@@ -13,7 +13,7 @@ import (
 type Sugestao struct {
 	ID    int    `json:"id"`
 	Texto string `json:"texto"`
-	CreateAt string `json:"data_criacao"`
+	CreatedAt string `json:"data_criacao"`
 	Author string `json:"author"`
 }
 
@@ -61,8 +61,7 @@ func main() {
 }
 
 func handleSugestoes(w http.ResponseWriter, r *http.Request) {
-	// CORS (Permite que seu Next.js acesse o backend)
-	w.Header().Set("Access-Control-Allow-Origin", "*") 
+	w.Header().Set("Access-Control-Allow-Origin", "https://portal-cacc-frontend.vercel.app") 
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
