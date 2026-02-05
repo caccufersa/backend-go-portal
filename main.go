@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"os"
 
-	_ "github.com/lib/pq" 
+	_ "github.com/lib/pq"
 )
 
 type Sugestao struct {
 	ID    int    `json:"id"`
 	Texto string `json:"texto"`
+	CreateAt string `json:"data_criacao"`
+	Author string `json:"author"`
 }
 
 var db *sql.DB
@@ -39,7 +41,8 @@ func main() {
 	CREATE TABLE IF NOT EXISTS sugestoes (
 		id SERIAL PRIMARY KEY,
 		texto TEXT NOT NULL,
-		data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		author TEXT NOT NULL
 	);`
 	
 	if _, err := db.Exec(queryCriaTabela); err != nil {
@@ -81,7 +84,7 @@ func handleSugestoes(w http.ResponseWriter, r *http.Request) {
 }
 
 func listar(w http.ResponseWriter) {
-	rows, err := db.Query("SELECT id, texto FROM sugestoes ORDER BY id DESC")
+	rows, err := db.Query("SELECT id, texto, data_criacao, author FROM sugestoes ORDER BY id DESC")
 	if err != nil {
 		http.Error(w, "Erro no banco", http.StatusInternalServerError)
 		log.Println("Erro query:", err)
@@ -92,7 +95,7 @@ func listar(w http.ResponseWriter) {
 	var lista []Sugestao
 	for rows.Next() {
 		var s Sugestao
-		if err := rows.Scan(&s.ID, &s.Texto); err != nil {
+		if err := rows.Scan(&s.ID, &s.Texto, &s.CreateAt, &s.Author); err != nil {
 			continue
 		}
 		lista = append(lista, s)
@@ -112,9 +115,9 @@ func criar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sqlStatement := `INSERT INTO sugestoes (texto) VALUES ($1) RETURNING id`
+	sqlStatement := `INSERT INTO sugestoes (texto, data_criacao, author) VALUES ($1, $2, $3) RETURNING id`
 	id := 0
-	err := db.QueryRow(sqlStatement, s.Texto).Scan(&id)
+	err := db.QueryRow(sqlStatement, s.Texto, s.CreateAt, s.Author).Scan(&id)
 	if err != nil {
 		http.Error(w, "Erro ao salvar", http.StatusInternalServerError)
 		log.Println("Erro insert:", err)
