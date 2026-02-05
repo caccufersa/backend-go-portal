@@ -49,6 +49,13 @@ func main() {
 		log.Fatal("Erro ao criar tabela:", err)
 	}
 
+	if _, err := db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP`); err != nil {
+		log.Fatal("Erro ao garantir coluna data_criacao:", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT`); err != nil {
+		log.Fatal("Erro ao garantir coluna author:", err)
+	}
+
 	http.HandleFunc("/api/sugestoes", handleSugestoes)
 
 	port := os.Getenv("PORT")
