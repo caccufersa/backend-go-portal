@@ -6,21 +6,21 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time" 
 
 	_ "github.com/lib/pq"
 )
 
 type Sugestao struct {
-	ID        int    `json:"id"`
-	Texto     string `json:"texto"`
-	CreatedAt string `json:"data_criacao"`
-	Author    string `json:"author"`
+	ID        int       `json:"id"`
+	Texto     string    `json:"texto"`
+	CreatedAt time.Time `json:"data_criacao"` 
+	Author    string    `json:"author"`
 }
 
 var db *sql.DB
 
 func main() {
-
 	connStr := os.Getenv("DATABASE_URL")
 	if connStr == "" {
 		log.Fatal("Erro: A variável de ambiente DATABASE_URL é obrigatória.")
@@ -29,12 +29,12 @@ func main() {
 	var err error
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
-		log.Fatal("Erro ao abrir conexão:", err)
+		log.Fatal(err)
 	}
 	defer db.Close()
 
 	if err = db.Ping(); err != nil {
-		log.Fatal("Erro ao conectar no banco (Ping):", err)
+		log.Fatal("Erro Ping Banco:", err)
 	}
 
 	queryCriaTabela := `
@@ -42,19 +42,15 @@ func main() {
 		id SERIAL PRIMARY KEY,
 		texto TEXT NOT NULL,
 		data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		author TEXT NOT NULL
+		author TEXT
 	);`
 
 	if _, err := db.Exec(queryCriaTabela); err != nil {
-		log.Fatal("Erro ao criar tabela:", err)
+		log.Fatal("Erro Create Table:", err)
 	}
 
-	if _, err := db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP`); err != nil {
-		log.Fatal("Erro ao garantir coluna data_criacao:", err)
-	}
-	if _, err := db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT`); err != nil {
-		log.Fatal("Erro ao garantir coluna author:", err)
-	}
+	db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP`)
+	db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT`)
 
 	http.HandleFunc("/api/sugestoes", handleSugestoes)
 
@@ -63,7 +59,7 @@ func main() {
 		port = "8080"
 	}
 
-	log.Println("Backend CACC rodando")
+	log.Println("Backend CACC rodando na porta " + port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
@@ -79,21 +75,26 @@ func handleSugestoes(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	switch r.Method {
-	case http.MethodGet:
+	if r.Method == http.MethodGet {
 		listar(w)
-	case http.MethodPost:
+	} else if r.Method == http.MethodPost {
 		criar(w, r)
-	default:
+	} else {
 		http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
 	}
 }
 
 func listar(w http.ResponseWriter) {
-	rows, err := db.Query("SELECT id, texto, data_criacao, author FROM sugestoes ORDER BY id DESC")
+
+	query := `
+		SELECT id, texto, data_criacao, COALESCE(author, 'Anônimo') 
+		FROM sugestoes 
+		ORDER BY id DESC
+	`
+	rows, err := db.Query(query)
 	if err != nil {
+		log.Println("Erro Query:", err)
 		http.Error(w, "Erro no banco", http.StatusInternalServerError)
-		log.Println("Erro query:", err)
 		return
 	}
 	defer rows.Close()
@@ -101,13 +102,14 @@ func listar(w http.ResponseWriter) {
 	var lista []Sugestao
 	for rows.Next() {
 		var s Sugestao
+
 		if err := rows.Scan(&s.ID, &s.Texto, &s.CreatedAt, &s.Author); err != nil {
+			log.Println("Erro Scan (pulando linha):", err)
 			continue
 		}
 		lista = append(lista, s)
 	}
 
-	// Retorna array vazio [] em vez de null se não tiver nada
 	if lista == nil {
 		lista = []Sugestao{}
 	}
@@ -115,26 +117,31 @@ func listar(w http.ResponseWriter) {
 }
 
 func criar(w http.ResponseWriter, r *http.Request) {
-    var s Sugestao
-    if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
-        http.Error(w, "JSON inválido", http.StatusBadRequest)
-        return
-    }
+	var s Sugestao
+	if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
+		http.Error(w, "JSON inválido", http.StatusBadRequest)
+		return
+	}
 
-    sqlStatement := `INSERT INTO sugestoes (texto, author) VALUES ($1, $2) RETURNING id`
-    
-    id := 0
+	sqlStatement := `INSERT INTO sugestoes (texto, author) VALUES ($1, $2) RETURNING id`
 
-    err := db.QueryRow(sqlStatement, s.Texto, s.Author).Scan(&id)
-    if err != nil {
-        http.Error(w, "Erro ao salvar", http.StatusInternalServerError)
-        log.Println("Erro insert:", err)
-        return
-    }
+	id := 0
 
-    w.WriteHeader(http.StatusCreated)
-    json.NewEncoder(w).Encode(map[string]interface{}{
-        "status": "Sucesso",
-        "id":     id,
-    })
+	authorToSave := s.Author
+	if authorToSave == "" {
+		authorToSave = "Anônimo"
+	}
+
+	err := db.QueryRow(sqlStatement, s.Texto, authorToSave).Scan(&id)
+	if err != nil {
+		log.Println("Erro Insert:", err)
+		http.Error(w, "Erro ao salvar", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "Sucesso",
+		"id":     id,
+	})
 }
