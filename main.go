@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"time" 
+	"time"
 
 	_ "github.com/lib/pq"
 )
@@ -14,7 +14,7 @@ import (
 type Sugestao struct {
 	ID        int       `json:"id"`
 	Texto     string    `json:"texto"`
-	CreatedAt time.Time `json:"data_criacao"` 
+	CreatedAt time.Time `json:"data_criacao"`
 	Author    string    `json:"author"`
 }
 
@@ -66,7 +66,7 @@ func main() {
 func handleSugestoes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "https://portal-cacc-frontend.vercel.app")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Cache-Control")
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
