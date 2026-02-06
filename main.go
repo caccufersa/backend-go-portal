@@ -115,24 +115,26 @@ func listar(w http.ResponseWriter) {
 }
 
 func criar(w http.ResponseWriter, r *http.Request) {
-	var s Sugestao
-	if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
-		http.Error(w, "JSON inválido", http.StatusBadRequest)
-		return
-	}
+    var s Sugestao
+    if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
+        http.Error(w, "JSON inválido", http.StatusBadRequest)
+        return
+    }
 
-	sqlStatement := `INSERT INTO sugestoes (texto, data_criacao, author) VALUES ($1, $2, $3) RETURNING id`
-	id := 0
-	err := db.QueryRow(sqlStatement, s.Texto, s.CreatedAt, s.Author).Scan(&id)
-	if err != nil {
-		http.Error(w, "Erro ao salvar", http.StatusInternalServerError)
-		log.Println("Erro insert:", err)
-		return
-	}
+    sqlStatement := `INSERT INTO sugestoes (texto, author) VALUES ($1, $2) RETURNING id`
+    
+    id := 0
 
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status": "Sucesso",
-		"id":     id,
-	})
+    err := db.QueryRow(sqlStatement, s.Texto, s.Author).Scan(&id)
+    if err != nil {
+        http.Error(w, "Erro ao salvar", http.StatusInternalServerError)
+        log.Println("Erro insert:", err)
+        return
+    }
+
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "status": "Sucesso",
+        "id":     id,
+    })
 }
