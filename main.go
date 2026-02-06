@@ -66,7 +66,7 @@ func main() {
 func handleSugestoes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "https://portal-cacc-frontend.vercel.app")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Cache-Control")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Cache-Control, Pragma")
 
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
