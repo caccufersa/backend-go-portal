@@ -2,21 +2,18 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"log"
 	"os"
 	"time"
 
 	"cacc/pkg/database"
-	"cacc/pkg/middleware"
+	"cacc/pkg/server"
 	"cacc/services/social/handlers"
 	hub "cacc/services/social/internal"
 	"cacc/services/social/models"
 
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/compress"
-	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 )
 
@@ -37,29 +34,12 @@ func main() {
 		wsHub.Broadcast(models.WSMessage{Type: msgType, Data: data})
 	}
 
-	app := fiber.New(fiber.Config{
-		AppName:               "CACC Social",
-		Prefork:               false,
-		DisableStartupMessage: false,
-		ReduceMemoryUsage:     true,
-		JSONEncoder:           json.Marshal,
-		JSONDecoder:           json.Unmarshal,
-	})
-
-	app.Use(compress.New(compress.Config{
-		Level: compress.LevelBestSpeed,
-	}))
+	app := server.NewApp("social")
 
 	app.Use(limiter.New(limiter.Config{
 		Max:        100,
 		Expiration: 1 * time.Minute,
 	}))
-
-	app.Use(cors.New(middleware.CORSConfig()))
-
-	app.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok", "service": "social", "clients": wsHub.ClientCount()})
-	})
 
 	api := app.Group("/api")
 	api.Get("/posts", h.ListarFeed)

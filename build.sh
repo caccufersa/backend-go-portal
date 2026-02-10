@@ -13,9 +13,13 @@ case "$SERVICE_NAME" in
     echo "Building Auth Service..."
     go build -o bin/auth ./services/auth
     ;;
+  "noticias")
+    echo "Building Noticias Service..."
+    go build -o bin/noticias ./services/noticias
+    ;;
   *)
     echo "Erro: SERVICE_NAME não definido ou inválido"
-    echo "Use: sugestoes, social ou auth"
+    echo "Use: sugestoes, social, auth ou noticias"
     exit 1
     ;;
 esac

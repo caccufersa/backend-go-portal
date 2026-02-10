@@ -8,12 +8,9 @@ import (
 	"os"
 
 	"cacc/pkg/database"
-	"cacc/pkg/middleware"
+	"cacc/pkg/server"
 	"cacc/services/sugestoes/handlers"
 	"cacc/services/sugestoes/models"
-
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/cors"
 )
 
 func main() {
@@ -56,15 +53,7 @@ func main() {
 		resp.Body.Close()
 	}
 
-	app := fiber.New(fiber.Config{
-		AppName: "CACC Sugestões Service",
-	})
-
-	app.Use(cors.New(middleware.CORSConfig()))
-
-	app.Get("/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok", "service": "sugestoes"})
-	})
+	app := server.NewApp("sugestoes")
 
 	api := app.Group("/api")
 	api.Get("/sugestoes", h.Listar)
