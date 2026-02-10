@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"cacc/pkg/database"
-	"cacc/pkg/middleware"
 	"cacc/pkg/server"
 	"cacc/services/noticias/handlers"
 
@@ -40,10 +39,10 @@ func main() {
 	api.Get("/:id", h.BuscarPorID)
 
 	// --- rotas protegidas (só autenticados criam/editam/deletam) ---
-	protegido := api.Group("", middleware.AuthMiddleware)
-	protegido.Post("/", h.Criar)
-	protegido.Put("/:id", h.Atualizar)
-	protegido.Delete("/:id", h.Deletar)
+	editor := api.Group("", EditorAuthMiddleware)
+	editor.Post("/", h.Criar)
+	editor.Put("/:id", h.Atualizar)
+	editor.Delete("/:id", h.Deletar)
 
 	port := os.Getenv("PORT")
 	if port == "" {
