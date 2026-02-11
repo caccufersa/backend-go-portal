@@ -6,7 +6,7 @@ import (
 
 func CORSConfig() cors.Config {
 	return cors.Config{
-		AllowOrigins:     "http://localhost:3000,https://portal-cacc-frontend.vercel.app",
+		AllowOrigins:     "http://localhost:3000,https://portal-cacc-frontend.vercel.app,https://localhost:5173",
 		AllowMethods:     "POST,GET,DELETE,PUT,OPTIONS",
 		AllowHeaders:     "Content-Type,Cache-Control,Pragma,Authorization",
 		AllowCredentials: true,
