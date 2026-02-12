@@ -19,10 +19,6 @@ func New(db *sql.DB) *Handler {
 	return &Handler{DB: db}
 }
 
-// ---------------------------------------------------------------------------
-// Listar — GET /api/noticias?limit=20&offset=0&categoria=Eventos
-// ---------------------------------------------------------------------------
-
 func (h *Handler) Listar(c *fiber.Ctx) error {
 	limit := c.QueryInt("limit", 20)
 	if limit > 100 {
@@ -70,10 +66,6 @@ func (h *Handler) Listar(c *fiber.Ctx) error {
 	return c.JSON(noticias)
 }
 
-// ---------------------------------------------------------------------------
-// BuscarPorID — GET /api/noticias/:id
-// ---------------------------------------------------------------------------
-
 func (h *Handler) BuscarPorID(c *fiber.Ctx) error {
 	id, err := strconv.Atoi(c.Params("id"))
 	if err != nil {
@@ -97,10 +89,6 @@ func (h *Handler) BuscarPorID(c *fiber.Ctx) error {
 
 	return c.JSON(n)
 }
-
-// ---------------------------------------------------------------------------
-// Destaques — GET /api/noticias/destaques
-// ---------------------------------------------------------------------------
 
 func (h *Handler) Destaques(c *fiber.Ctx) error {
 	rows, err := h.DB.Query(
@@ -126,10 +114,6 @@ func (h *Handler) Destaques(c *fiber.Ctx) error {
 	return c.JSON(noticias)
 }
 
-// ---------------------------------------------------------------------------
-// Criar — POST /api/noticias (protegido)
-// ---------------------------------------------------------------------------
-
 func (h *Handler) Criar(c *fiber.Ctx) error {
 	var req models.CriarNoticiaRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -151,7 +135,6 @@ func (h *Handler) Criar(c *fiber.Ctx) error {
 		req.Resumo = req.Conteudo
 	}
 
-	// usa o username do token JWT se não vier no body
 	if req.Author == "" {
 		if username, ok := c.Locals("username").(string); ok {
 			req.Author = username
@@ -177,9 +160,6 @@ func (h *Handler) Criar(c *fiber.Ctx) error {
 	return c.Status(201).JSON(n)
 }
 
-// ---------------------------------------------------------------------------
-// Atualizar — PUT /api/noticias/:id (protegido)
-// ---------------------------------------------------------------------------
 
 func (h *Handler) Atualizar(c *fiber.Ctx) error {
 	id, err := strconv.Atoi(c.Params("id"))
@@ -192,7 +172,6 @@ func (h *Handler) Atualizar(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
 	}
 
-	// constrói a query dinamicamente com os campos presentes
 	sets := []string{}
 	args := []interface{}{}
 	argIdx := 1
@@ -247,13 +226,8 @@ func (h *Handler) Atualizar(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"erro": "Notícia não encontrada"})
 	}
 
-	// retorna a notícia atualizada
 	return h.BuscarPorID(c)
 }
-
-// ---------------------------------------------------------------------------
-// Deletar — DELETE /api/noticias/:id (protegido)
-// ---------------------------------------------------------------------------
 
 func (h *Handler) Deletar(c *fiber.Ctx) error {
 	id, err := strconv.Atoi(c.Params("id"))

@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"cacc/pkg/database"
-	"cacc/pkg/middleware"
 	"cacc/pkg/server"
 	"cacc/services/noticias/handlers"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 )
 
@@ -34,13 +34,11 @@ func main() {
 
 	api := app.Group("/api/noticias")
 
-	// --- rotas públicas ---
 	api.Get("/", h.Listar)
 	api.Get("/destaques", h.Destaques)
 	api.Get("/:id", h.BuscarPorID)
 
-	// --- rotas protegidas (só autenticados criam/editam/deletam) ---
-	protegido := api.Group("", middleware.AuthMiddleware)
+	protegido := api.Group("", apiKeyMiddleware)
 	protegido.Post("/", h.Criar)
 	protegido.Put("/:id", h.Atualizar)
 	protegido.Delete("/:id", h.Deletar)
@@ -52,6 +50,18 @@ func main() {
 
 	log.Println("Notícias rodando na porta " + port)
 	log.Fatal(app.Listen(":" + port))
+}
+
+func apiKeyMiddleware(c *fiber.Ctx) error {
+	apiKey := c.Get("X-API-Key")
+
+	expectedKey := os.Getenv("NOTICIAS_API_KEY")
+	
+	if apiKey != expectedKey {
+		return c.Status(401).JSON(fiber.Map{"erro": "API key inválida"})
+	}
+
+	return c.Next()
 }
 
 func setupDatabase(db *sql.DB) {
