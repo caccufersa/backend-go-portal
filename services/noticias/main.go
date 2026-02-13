@@ -79,10 +79,10 @@ func setupDatabase(db *sql.DB) {
 		categoria TEXT NOT NULL DEFAULT 'Geral',
 		image_url TEXT,
 		destaque BOOLEAN NOT NULL DEFAULT false,
-		tags TEXT[] DEFAULT '{}',
 		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
+	ALTER TABLE noticias ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}';
 	CREATE INDEX IF NOT EXISTS idx_noticias_created ON noticias(created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_noticias_categoria ON noticias(categoria);
 	CREATE INDEX IF NOT EXISTS idx_noticias_destaque ON noticias(destaque) WHERE destaque = true;
