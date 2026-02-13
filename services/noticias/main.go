@@ -38,6 +38,10 @@ func main() {
 	api.Get("/destaques", h.Destaques)
 	api.Get("/:id", h.BuscarPorID)
 
+	// Endpoints para suporte ao Editor.js
+	api.Post("/fetch-link-meta", h.FetchLinkMeta)
+	api.Post("/upload/image", h.UploadImage)
+
 	protegido := api.Group("", apiKeyMiddleware)
 	protegido.Post("/", h.Criar)
 	protegido.Put("/:id", h.Atualizar)
@@ -56,7 +60,7 @@ func apiKeyMiddleware(c *fiber.Ctx) error {
 	apiKey := c.Get("X-API-Key")
 
 	expectedKey := os.Getenv("NOTICIAS_API_KEY")
-	
+
 	if apiKey != expectedKey {
 		return c.Status(401).JSON(fiber.Map{"erro": "API key inválida"})
 	}
@@ -75,12 +79,14 @@ func setupDatabase(db *sql.DB) {
 		categoria TEXT NOT NULL DEFAULT 'Geral',
 		image_url TEXT,
 		destaque BOOLEAN NOT NULL DEFAULT false,
+		tags TEXT[] DEFAULT '{}',
 		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_noticias_created ON noticias(created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_noticias_categoria ON noticias(categoria);
 	CREATE INDEX IF NOT EXISTS idx_noticias_destaque ON noticias(destaque) WHERE destaque = true;
+	CREATE INDEX IF NOT EXISTS idx_noticias_tags ON noticias USING GIN(tags);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		log.Fatal("Erro ao criar schema noticias:", err)
