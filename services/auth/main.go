@@ -158,40 +158,60 @@ func main() {
 }
 
 func setupDatabase(db *sql.DB) {
-	schema := `
-    CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-
-    CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        uuid UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
-        username TEXT UNIQUE NOT NULL,
-        password TEXT NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS sessions (
-        id SERIAL PRIMARY KEY,
-        user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        refresh_token TEXT UNIQUE NOT NULL,
-        user_agent TEXT NOT NULL DEFAULT '',
-        ip TEXT NOT NULL DEFAULT '',
-        expires_at TIMESTAMP NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-    CREATE INDEX IF NOT EXISTS idx_users_uuid ON users(uuid);
-    CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(refresh_token);
-    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
-    `
-	if _, err := db.Exec(schema); err != nil {
-		log.Fatal("Erro ao criar schema auth:", err)
+	if _, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`); err != nil {
+		log.Println("Aviso ao criar extensão pgcrypto:", err)
 	}
 
-	db.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS uuid UUID UNIQUE DEFAULT gen_random_uuid()`)
-	db.Exec(`UPDATE users SET uuid = gen_random_uuid() WHERE uuid IS NULL`)
+	if _, err := db.Exec(`
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            uuid UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `); err != nil {
+		log.Fatal("Erro ao criar tabela users:", err)
+	}
+
+	if _, err := db.Exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+            id SERIAL PRIMARY KEY,
+            user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            refresh_token TEXT UNIQUE NOT NULL,
+            user_agent TEXT NOT NULL DEFAULT '',
+            ip TEXT NOT NULL DEFAULT '',
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `); err != nil {
+		log.Fatal("Erro ao criar tabela sessions:", err)
+	}
+
+	indexQueries := []string{
+		`CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)`,
+		`CREATE INDEX IF NOT EXISTS idx_users_uuid ON users(uuid)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(refresh_token)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)`,
+	}
+
+	for _, indexQuery := range indexQueries {
+		if _, err := db.Exec(indexQuery); err != nil {
+			log.Println("Aviso ao criar índice:", err)
+		}
+	}
+
+	if _, err := db.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS uuid UUID UNIQUE DEFAULT gen_random_uuid()`); err != nil {
+		log.Println("Aviso ao adicionar coluna uuid:", err)
+	}
+	if _, err := db.Exec(`UPDATE users SET uuid = gen_random_uuid() WHERE uuid IS NULL`); err != nil {
+		log.Println("Aviso ao atualizar uuids:", err)
+	}
+
+	log.Println("Schema auth criado com sucesso")
 }
 
-// limpeza periódica de sessões expiradas
 func cleanExpiredSessions(db *sql.DB) {
 	go func() {
 		for {
