@@ -11,16 +11,13 @@ import (
 	"time"
 	"unicode"
 
+	"cacc/pkg/hub"
 	"cacc/services/auth/models"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
-
-// ---------------------------------------------------------------------------
-// Cache em memória para sessões ativas (evita hit no DB a cada /me)
-// ---------------------------------------------------------------------------
 
 type CachedUser struct {
 	User      models.User
@@ -73,12 +70,9 @@ func (c *UserCache) cleanup() {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Handler
-// ---------------------------------------------------------------------------
-
 type Handler struct {
 	DB        *sql.DB
+	Hub       *hub.Hub // hub central do WebSocket
 	jwtSecret string
 	cache     *UserCache
 }
@@ -90,10 +84,6 @@ func New(db *sql.DB) *Handler {
 	}
 	return &Handler{DB: db, jwtSecret: secret, cache: NewCache()}
 }
-
-// ---------------------------------------------------------------------------
-// Register
-// ---------------------------------------------------------------------------
 
 func (h *Handler) Register(c *fiber.Ctx) error {
 	var req models.RegisterRequest
@@ -132,12 +122,10 @@ func (h *Handler) Register(c *fiber.Ctx) error {
 	}
 
 	h.cache.Set(user)
+	h.broadcastAuthEvent("user_registered", user)
 	return h.createSessionAndRespond(c, user, 201)
 }
 
-// ---------------------------------------------------------------------------
-// Login
-// ---------------------------------------------------------------------------
 
 func (h *Handler) Login(c *fiber.Ctx) error {
 	var req models.LoginRequest
@@ -169,15 +157,11 @@ func (h *Handler) Login(c *fiber.Ctx) error {
 	}
 
 	h.cache.Set(user)
+	h.broadcastAuthEvent("user_login", user)
 	return h.createSessionAndRespond(c, user, 200)
 }
 
-// ---------------------------------------------------------------------------
-// Refresh — rotação de refresh token (o antigo é invalidado)
-// ---------------------------------------------------------------------------
-
 func (h *Handler) Refresh(c *fiber.Ctx) error {
-	// aceita do body OU do cookie
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
 	}
@@ -189,7 +173,6 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"erro": "Refresh token não informado"})
 	}
 
-	// busca sessão no banco
 	var session models.Session
 	var user models.User
 	err := h.DB.QueryRow(
@@ -213,7 +196,6 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 
 	user.ID = session.UserID
 
-	// rotação: gera novo refresh token e atualiza a sessão existente
 	newRefresh := generateRefreshToken()
 	newExpiry := time.Now().Add(30 * 24 * time.Hour) // 30 dias
 	_, err = h.DB.Exec(
@@ -237,13 +219,8 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// Session — o frontend chama ao iniciar pra verificar se continua logado
-// Tenta usar o access token; se expirado, faz refresh automático via cookie
-// ---------------------------------------------------------------------------
 
 func (h *Handler) Session(c *fiber.Ctx) error {
-	// 1. tenta access token
 	auth := c.Get("Authorization")
 	if auth != "" {
 		parts := strings.Split(auth, " ")
@@ -256,7 +233,6 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 				userID := int((*claims)["user_id"].(float64))
 				username := (*claims)["username"].(string)
 
-				// retorna do cache se possível
 				if user, ok := h.cache.Get(userID); ok {
 					return c.JSON(fiber.Map{"authenticated": true, "user": user})
 				}
@@ -269,7 +245,6 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 		}
 	}
 
-	// 2. access token ausente/expirado — tenta refresh via cookie
 	refreshToken := c.Cookies("refresh_token")
 	if refreshToken == "" {
 		return c.Status(401).JSON(fiber.Map{"authenticated": false, "erro": "Nenhuma sessão ativa"})
@@ -293,7 +268,6 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 
 	user.ID = session.UserID
 
-	// rotação automática
 	newRefresh := generateRefreshToken()
 	newExpiry := time.Now().Add(30 * 24 * time.Hour)
 	h.DB.Exec(`UPDATE sessions SET refresh_token = $1, expires_at = $2 WHERE id = $3`,
@@ -310,10 +284,6 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 		"expires_in":    3600,
 	})
 }
-
-// ---------------------------------------------------------------------------
-// Me — retorna dados do usuário autenticado
-// ---------------------------------------------------------------------------
 
 func (h *Handler) Me(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(int)
@@ -335,17 +305,12 @@ func (h *Handler) Me(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"user": user})
 }
 
-// ---------------------------------------------------------------------------
-// Logout — invalida a sessão atual
-// ---------------------------------------------------------------------------
-
 func (h *Handler) Logout(c *fiber.Ctx) error {
 	refreshToken := c.Cookies("refresh_token")
 	if refreshToken != "" {
 		h.DB.Exec(`DELETE FROM sessions WHERE refresh_token = $1`, refreshToken)
 	}
 
-	// também tenta pelo body (mobile/SPA pode enviar)
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
 	}
@@ -360,12 +325,13 @@ func (h *Handler) Logout(c *fiber.Ctx) error {
 	}
 
 	h.clearRefreshCookie(c)
+
+	if uid, ok2 := c.Locals("user_id").(int); ok2 {
+		h.broadcastAuthEvent("user_logout", models.User{ID: uid})
+	}
+
 	return c.JSON(fiber.Map{"status": "ok"})
 }
-
-// ---------------------------------------------------------------------------
-// LogoutAll — invalida todas as sessões do usuário
-// ---------------------------------------------------------------------------
 
 func (h *Handler) LogoutAll(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(int)
@@ -374,10 +340,6 @@ func (h *Handler) LogoutAll(c *fiber.Ctx) error {
 	h.clearRefreshCookie(c)
 	return c.JSON(fiber.Map{"status": "ok", "message": "Todas as sessões encerradas"})
 }
-
-// ---------------------------------------------------------------------------
-// Sessions — lista sessões ativas do usuário
-// ---------------------------------------------------------------------------
 
 func (h *Handler) Sessions(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(int)
@@ -406,10 +368,6 @@ func (h *Handler) Sessions(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"sessions": sessions})
 }
-
-// ===========================================================================
-// Funções internas
-// ===========================================================================
 
 func (h *Handler) createSessionAndRespond(c *fiber.Ctx, user models.User, status int) error {
 	accessToken := h.generateAccessToken(user.ID, user.Username)
@@ -483,10 +441,6 @@ func (h *Handler) clearRefreshCookie(c *fiber.Ctx) {
 	})
 }
 
-// ---------------------------------------------------------------------------
-// Validações
-// ---------------------------------------------------------------------------
-
 func validateUsername(u string) error {
 	if len(u) < 3 {
 		return fiber.NewError(400, "Username deve ter ao menos 3 caracteres")
@@ -510,4 +464,20 @@ func validatePassword(p string) error {
 		return fiber.NewError(400, "Senha muito longa")
 	}
 	return nil
+}
+
+func (h *Handler) broadcastAuthEvent(eventType string, user models.User) {
+	if h.Hub == nil {
+		return
+	}
+	go h.Hub.Broadcast(hub.WSMessage{
+		Type:    eventType,
+		Service: "auth",
+		Channel: "auth",
+		UserID:  user.ID,
+		Data: fiber.Map{
+			"user_id":  user.ID,
+			"username": user.Username,
+		},
+	})
 }

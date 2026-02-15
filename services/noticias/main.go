@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"cacc/pkg/database"
+	"cacc/pkg/hub"
 	"cacc/pkg/server"
 	"cacc/services/noticias/handlers"
 
@@ -24,7 +25,22 @@ func main() {
 
 	setupDatabase(db)
 
+	// --- Conecta ao hub central (auth) via WebSocket ---
+	hubURL := os.Getenv("AUTH_HUB_URL")
+	if hubURL == "" {
+		hubURL = "ws://localhost:8082/ws/hub"
+	}
+
+	hubClient := hub.NewClient(hubURL, "noticias", []string{"*"})
+	go hubClient.Connect()
+	defer hubClient.Close()
+
 	h := handlers.New(db)
+
+	// Broadcast via hub central
+	h.OnBroadcast = func(msgType string, data interface{}) {
+		hubClient.Broadcast(msgType, "noticias", data)
+	}
 
 	app := server.NewApp("noticias")
 	app.Use(limiter.New(limiter.Config{

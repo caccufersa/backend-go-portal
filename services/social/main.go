@@ -7,12 +7,10 @@ import (
 	"time"
 
 	"cacc/pkg/database"
+	"cacc/pkg/hub"
 	"cacc/pkg/server"
 	"cacc/services/social/handlers"
-	hub "cacc/services/social/internal"
-	"cacc/services/social/models"
 
-	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 )
@@ -27,11 +25,21 @@ func main() {
 
 	setupDatabase(db)
 
-	wsHub := hub.New()
+	// --- Conecta ao hub central (auth) via WebSocket ---
+	hubURL := os.Getenv("AUTH_HUB_URL")
+	if hubURL == "" {
+		hubURL = "ws://localhost:8082/ws/hub"
+	}
+
+	hubClient := hub.NewClient(hubURL, "social", []string{"*"})
+	go hubClient.Connect()
+	defer hubClient.Close()
+
 	h := handlers.New(db)
 
+	// Broadcast via hub central
 	h.OnBroadcast = func(msgType string, data interface{}) {
-		wsHub.Broadcast(models.WSMessage{Type: msgType, Data: data})
+		hubClient.Broadcast(msgType, "social", data)
 	}
 
 	app := server.NewApp("social")
@@ -50,22 +58,15 @@ func main() {
 	api.Delete("/posts/:id/like", h.Descurtir)
 	api.Get("/users/:username", h.BuscarPerfil)
 
+	// Endpoint de fallback HTTP para broadcast (mantém compatibilidade)
 	app.Post("/internal/broadcast", func(c *fiber.Ctx) error {
-		var msg models.WSMessage
+		var msg hub.WSMessage
 		if err := c.BodyParser(&msg); err != nil {
 			return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
 		}
-		wsHub.Broadcast(msg)
+		hubClient.Send(msg)
 		return c.JSON(fiber.Map{"status": "ok"})
 	})
-
-	app.Use("/ws", func(c *fiber.Ctx) error {
-		if websocket.IsWebSocketUpgrade(c) {
-			return c.Next()
-		}
-		return fiber.ErrUpgradeRequired
-	})
-	app.Get("/ws", websocket.New(wsHub.HandleConnection))
 
 	port := os.Getenv("PORT")
 	if port == "" {

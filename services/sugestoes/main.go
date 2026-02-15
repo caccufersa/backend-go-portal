@@ -1,13 +1,11 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"log"
-	"net/http"
 	"os"
 
 	"cacc/pkg/database"
+	"cacc/pkg/hub"
 	"cacc/pkg/server"
 	"cacc/services/sugestoes/handlers"
 	"cacc/services/sugestoes/models"
@@ -31,26 +29,21 @@ func main() {
 	db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT`)
 	db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS categoria TEXT DEFAULT 'Geral'`)
 
-	h := handlers.New(db)
-
-	socialURL := os.Getenv("SOCIAL_SERVICE_URL")
-	if socialURL == "" {
-		socialURL = "http://localhost:8081"
+	// --- Conecta ao hub central (auth) via WebSocket ---
+	hubURL := os.Getenv("AUTH_HUB_URL")
+	if hubURL == "" {
+		hubURL = "ws://localhost:8082/ws/hub"
 	}
 
+	hubClient := hub.NewClient(hubURL, "sugestoes", []string{"*"})
+	go hubClient.Connect()
+	defer hubClient.Close()
+
+	h := handlers.New(db)
+
+	// Broadcast via hub central (substitui o HTTP POST ao social)
 	h.OnCreate = func(s models.Sugestao) {
-		msg := map[string]interface{}{
-			"type":   "new_sugestao",
-			"data":   s,
-			"author": s.Author,
-		}
-		body, _ := json.Marshal(msg)
-		resp, err := http.Post(socialURL+"/internal/broadcast", "application/json", bytes.NewReader(body))
-		if err != nil {
-			log.Println("Erro ao notificar serviço social:", err)
-			return
-		}
-		resp.Body.Close()
+		hubClient.Broadcast("new_sugestao", "sugestoes", s)
 	}
 
 	app := server.NewApp("sugestoes")

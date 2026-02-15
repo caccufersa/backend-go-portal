@@ -4,15 +4,19 @@ import (
 	"database/sql"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"cacc/pkg/database"
+	"cacc/pkg/hub"
 	"cacc/pkg/middleware"
 	"cacc/pkg/server"
 	"cacc/services/auth/handlers"
 
+	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func main() {
@@ -26,7 +30,12 @@ func main() {
 	setupDatabase(db)
 	cleanExpiredSessions(db)
 
+	// --- Hub central de WebSocket ---
+	wsHub := hub.New()
+
 	h := handlers.New(db)
+	// Injecta o hub no handler para broadcasts internos (login, logout, etc.)
+	h.Hub = wsHub
 
 	app := server.NewApp("auth")
 
@@ -52,12 +61,81 @@ func main() {
 	protected.Post("/logout-all", h.LogoutAll)
 	protected.Get("/sessions", h.Sessions)
 
+	// --- Hub status (protegido) ---
+	protected.Get("/hub/status", func(c *fiber.Ctx) error {
+		clients, services := wsHub.ClientCount()
+		return c.JSON(fiber.Map{
+			"clients":  clients,
+			"services": services,
+		})
+	})
+
+	// --- WebSocket: microservices conectam aqui ---
+	app.Use("/ws/hub", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/ws/hub", websocket.New(func(c *websocket.Conn) {
+		wsHub.HandleServiceConn(c)
+	}))
+
+	// --- WebSocket: clientes frontend conectam aqui (com JWT) ---
+	app.Use("/ws", func(c *fiber.Ctx) error {
+		if !websocket.IsWebSocketUpgrade(c) {
+			return fiber.ErrUpgradeRequired
+		}
+
+		// autentica via query param: /ws?token=xxx
+		tokenStr := c.Query("token")
+		if tokenStr == "" {
+			// tenta pelo header Authorization
+			authHeader := c.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				tokenStr = authHeader[7:]
+			}
+		}
+
+		userID := 0
+		if tokenStr != "" {
+			secret := os.Getenv("JWT_SECRET")
+			if secret == "" {
+				secret = "dev-secret-key-change-in-production"
+			}
+			token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
+				return []byte(secret), nil
+			})
+			if err == nil && token.Valid {
+				claims := token.Claims.(*jwt.MapClaims)
+				userID = int((*claims)["user_id"].(float64))
+			}
+		}
+
+		c.Locals("user_id", userID)
+		return c.Next()
+	})
+	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
+		userID, _ := c.Locals("user_id").(int)
+		wsHub.HandleClientConn(c, userID)
+	}))
+
+	// --- Endpoint HTTP para broadcast (fallback / interno) ---
+	app.Post("/internal/broadcast", func(c *fiber.Ctx) error {
+		var msg hub.WSMessage
+		if err := c.BodyParser(&msg); err != nil {
+			return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
+		}
+		wsHub.Broadcast(msg)
+		return c.JSON(fiber.Map{"status": "ok"})
+	})
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8082"
 	}
 
-	log.Println("Auth rodando na porta " + port)
+	log.Println("Auth Hub rodando na porta " + port)
 	log.Fatal(app.Listen(":" + port))
 }
 

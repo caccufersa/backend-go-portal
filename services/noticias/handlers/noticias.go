@@ -14,7 +14,8 @@ import (
 )
 
 type Handler struct {
-	DB *sql.DB
+	DB          *sql.DB
+	OnBroadcast func(msgType string, data interface{})
 }
 
 func New(db *sql.DB) *Handler {
@@ -233,6 +234,10 @@ func (h *Handler) Criar(c *fiber.Ctx) error {
 		n.ConteudoObj = &editorData
 	}
 
+	if h.OnBroadcast != nil {
+		go h.OnBroadcast("new_noticia", n)
+	}
+
 	return c.Status(201).JSON(n)
 }
 
@@ -327,6 +332,10 @@ func (h *Handler) Deletar(c *fiber.Ctx) error {
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		return c.Status(404).JSON(fiber.Map{"erro": "Notícia não encontrada"})
+	}
+
+	if h.OnBroadcast != nil {
+		go h.OnBroadcast("noticia_deleted", fiber.Map{"id": id})
 	}
 
 	return c.JSON(fiber.Map{"status": "ok", "message": "Notícia deletada"})
