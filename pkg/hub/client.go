@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fasthttp/websocket"
+	"github.com/gorilla/websocket"
 )
 
 type HubClient struct {
@@ -69,7 +69,7 @@ func (c *HubClient) dial() error {
 	if err != nil {
 		return err
 	}
-	
+
 	identBytes, _ := json.Marshal(c.identity)
 	if err := conn.WriteMessage(websocket.TextMessage, identBytes); err != nil {
 		conn.Close()

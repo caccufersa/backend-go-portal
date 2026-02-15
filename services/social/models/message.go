@@ -11,8 +11,3 @@ type Post struct {
 	CreatedAt time.Time `json:"data_criacao"`
 	Replies   []Post    `json:"replies,omitempty"`
 }
-
-type WSMessage struct {
-	Type string      `json:"type"`
-	Data interface{} `json:"data"`
-}

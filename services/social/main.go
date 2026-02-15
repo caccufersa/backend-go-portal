@@ -78,22 +78,34 @@ func main() {
 }
 
 func setupDatabase(db *sql.DB) {
-	schema := `
-	CREATE TABLE IF NOT EXISTS posts (
-		id SERIAL PRIMARY KEY,
-		texto TEXT NOT NULL,
-		author TEXT NOT NULL DEFAULT 'Anônimo',
-		parent_id INT REFERENCES posts(id) ON DELETE CASCADE,
-		likes INT NOT NULL DEFAULT 0,
-		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-	);
-	CREATE INDEX IF NOT EXISTS idx_posts_parent ON posts(parent_id);
-	CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
-	CREATE INDEX IF NOT EXISTS idx_posts_likes ON posts(likes DESC);
-	CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author);
-	CREATE INDEX IF NOT EXISTS idx_posts_root ON posts(created_at DESC) WHERE parent_id IS NULL;
-	`
-	if _, err := db.Exec(schema); err != nil {
-		log.Fatal("Erro ao criar schema social:", err)
+	// Criar tabela posts
+	if _, err := db.Exec(`
+        CREATE TABLE IF NOT EXISTS posts (
+            id SERIAL PRIMARY KEY,
+            texto TEXT NOT NULL,
+            author TEXT NOT NULL DEFAULT 'Anônimo',
+            parent_id INT REFERENCES posts(id) ON DELETE CASCADE,
+            likes INT NOT NULL DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `); err != nil {
+		log.Println("Aviso ao criar tabela posts:", err)
 	}
+
+	// Criar índices
+	indexQueries := []string{
+		`CREATE INDEX IF NOT EXISTS idx_posts_parent ON posts(parent_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_posts_likes ON posts(likes DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author)`,
+		`CREATE INDEX IF NOT EXISTS idx_posts_root ON posts(created_at DESC) WHERE parent_id IS NULL`,
+	}
+
+	for _, indexQuery := range indexQueries {
+		if _, err := db.Exec(indexQuery); err != nil {
+			log.Println("Aviso ao criar índice:", err)
+		}
+	}
+
+	log.Println("Schema social criado com sucesso")
 }
