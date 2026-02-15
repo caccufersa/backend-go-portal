@@ -25,12 +25,16 @@ type CachedUser struct {
 }
 
 type UserCache struct {
-	mu    sync.RWMutex
-	items map[int]*CachedUser
+	mu     sync.RWMutex
+	byID   map[int]*CachedUser
+	byUUID map[string]*CachedUser
 }
 
 func NewCache() *UserCache {
-	c := &UserCache{items: make(map[int]*CachedUser)}
+	c := &UserCache{
+		byID:   make(map[int]*CachedUser),
+		byUUID: make(map[string]*CachedUser),
+	}
 	go c.cleanup()
 	return c
 }
@@ -38,7 +42,16 @@ func NewCache() *UserCache {
 func (c *UserCache) Get(id int) (models.User, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if item, ok := c.items[id]; ok && time.Now().Before(item.ExpiresAt) {
+	if item, ok := c.byID[id]; ok && time.Now().Before(item.ExpiresAt) {
+		return item.User, true
+	}
+	return models.User{}, false
+}
+
+func (c *UserCache) GetByUUID(uuid string) (models.User, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if item, ok := c.byUUID[uuid]; ok && time.Now().Before(item.ExpiresAt) {
 		return item.User, true
 	}
 	return models.User{}, false
@@ -46,13 +59,20 @@ func (c *UserCache) Get(id int) (models.User, bool) {
 
 func (c *UserCache) Set(user models.User) {
 	c.mu.Lock()
-	c.items[user.ID] = &CachedUser{User: user, ExpiresAt: time.Now().Add(15 * time.Minute)}
+	entry := &CachedUser{User: user, ExpiresAt: time.Now().Add(15 * time.Minute)}
+	c.byID[user.ID] = entry
+	if user.UUID != "" {
+		c.byUUID[user.UUID] = entry
+	}
 	c.mu.Unlock()
 }
 
 func (c *UserCache) Delete(id int) {
 	c.mu.Lock()
-	delete(c.items, id)
+	if item, ok := c.byID[id]; ok {
+		delete(c.byUUID, item.User.UUID)
+	}
+	delete(c.byID, id)
 	c.mu.Unlock()
 }
 
@@ -61,9 +81,10 @@ func (c *UserCache) cleanup() {
 		time.Sleep(10 * time.Minute)
 		c.mu.Lock()
 		now := time.Now()
-		for k, v := range c.items {
+		for k, v := range c.byID {
 			if now.After(v.ExpiresAt) {
-				delete(c.items, k)
+				delete(c.byUUID, v.User.UUID)
+				delete(c.byID, k)
 			}
 		}
 		c.mu.Unlock()
@@ -72,7 +93,7 @@ func (c *UserCache) cleanup() {
 
 type Handler struct {
 	DB        *sql.DB
-	Hub       *hub.Hub // hub central do WebSocket
+	Hub       *hub.Hub
 	jwtSecret string
 	cache     *UserCache
 }
@@ -109,9 +130,9 @@ func (h *Handler) Register(c *fiber.Ctx) error {
 	var user models.User
 	err = h.DB.QueryRow(
 		`INSERT INTO users (username, password) VALUES ($1, $2)
-		 RETURNING id, username, created_at`,
+		 RETURNING id, uuid, username, created_at`,
 		strings.ToLower(req.Username), string(hashed),
-	).Scan(&user.ID, &user.Username, &user.CreatedAt)
+	).Scan(&user.ID, &user.UUID, &user.Username, &user.CreatedAt)
 
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") {
@@ -126,7 +147,6 @@ func (h *Handler) Register(c *fiber.Ctx) error {
 	return h.createSessionAndRespond(c, user, 201)
 }
 
-
 func (h *Handler) Login(c *fiber.Ctx) error {
 	var req models.LoginRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -140,9 +160,9 @@ func (h *Handler) Login(c *fiber.Ctx) error {
 	var user models.User
 	var hashedPw string
 	err := h.DB.QueryRow(
-		`SELECT id, username, password, created_at FROM users WHERE username = $1`,
+		`SELECT id, uuid, username, password, created_at FROM users WHERE username = $1`,
 		strings.ToLower(strings.TrimSpace(req.Username)),
-	).Scan(&user.ID, &user.Username, &hashedPw, &user.CreatedAt)
+	).Scan(&user.ID, &user.UUID, &user.Username, &hashedPw, &user.CreatedAt)
 
 	if err == sql.ErrNoRows {
 		return c.Status(401).JSON(fiber.Map{"erro": "Username ou senha incorretos"})
@@ -176,10 +196,10 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 	var session models.Session
 	var user models.User
 	err := h.DB.QueryRow(
-		`SELECT s.id, s.user_id, s.expires_at, u.username, u.created_at
+		`SELECT s.id, s.user_id, s.expires_at, u.uuid, u.username, u.created_at
 		 FROM sessions s JOIN users u ON u.id = s.user_id
 		 WHERE s.refresh_token = $1`, req.RefreshToken,
-	).Scan(&session.ID, &session.UserID, &session.ExpiresAt, &user.Username, &user.CreatedAt)
+	).Scan(&session.ID, &session.UserID, &session.ExpiresAt, &user.UUID, &user.Username, &user.CreatedAt)
 
 	if err == sql.ErrNoRows {
 		return c.Status(401).JSON(fiber.Map{"erro": "Sessão inválida ou expirada"})
@@ -197,7 +217,7 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 	user.ID = session.UserID
 
 	newRefresh := generateRefreshToken()
-	newExpiry := time.Now().Add(30 * 24 * time.Hour) // 30 dias
+	newExpiry := time.Now().Add(30 * 24 * time.Hour)
 	_, err = h.DB.Exec(
 		`UPDATE sessions SET refresh_token = $1, expires_at = $2 WHERE id = $3`,
 		newRefresh, newExpiry, session.ID,
@@ -207,7 +227,7 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"erro": "Erro interno"})
 	}
 
-	accessToken := h.generateAccessToken(user.ID, user.Username)
+	accessToken := h.generateAccessToken(user)
 	h.setRefreshCookie(c, newRefresh, newExpiry)
 	h.cache.Set(user)
 
@@ -218,7 +238,6 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 		ExpiresIn:    3600,
 	})
 }
-
 
 func (h *Handler) Session(c *fiber.Ctx) error {
 	auth := c.Get("Authorization")
@@ -231,6 +250,7 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 			if err == nil && token.Valid {
 				claims := token.Claims.(*jwt.MapClaims)
 				userID := int((*claims)["user_id"].(float64))
+				userUUID, _ := (*claims)["uuid"].(string)
 				username := (*claims)["username"].(string)
 
 				if user, ok := h.cache.Get(userID); ok {
@@ -239,7 +259,11 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 
 				return c.JSON(fiber.Map{
 					"authenticated": true,
-					"user":          fiber.Map{"id": userID, "username": username},
+					"user": fiber.Map{
+						"id":       userID,
+						"uuid":     userUUID,
+						"username": username,
+					},
 				})
 			}
 		}
@@ -253,10 +277,10 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 	var session models.Session
 	var user models.User
 	err := h.DB.QueryRow(
-		`SELECT s.id, s.user_id, s.expires_at, u.username, u.created_at
+		`SELECT s.id, s.user_id, s.expires_at, u.uuid, u.username, u.created_at
 		 FROM sessions s JOIN users u ON u.id = s.user_id
 		 WHERE s.refresh_token = $1`, refreshToken,
-	).Scan(&session.ID, &session.UserID, &session.ExpiresAt, &user.Username, &user.CreatedAt)
+	).Scan(&session.ID, &session.UserID, &session.ExpiresAt, &user.UUID, &user.Username, &user.CreatedAt)
 
 	if err != nil || time.Now().After(session.ExpiresAt) {
 		if err == nil {
@@ -273,7 +297,7 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 	h.DB.Exec(`UPDATE sessions SET refresh_token = $1, expires_at = $2 WHERE id = $3`,
 		newRefresh, newExpiry, session.ID)
 
-	accessToken := h.generateAccessToken(user.ID, user.Username)
+	accessToken := h.generateAccessToken(user)
 	h.setRefreshCookie(c, newRefresh, newExpiry)
 	h.cache.Set(user)
 
@@ -294,8 +318,8 @@ func (h *Handler) Me(c *fiber.Ctx) error {
 
 	var user models.User
 	err := h.DB.QueryRow(
-		`SELECT id, username, created_at FROM users WHERE id = $1`, userID,
-	).Scan(&user.ID, &user.Username, &user.CreatedAt)
+		`SELECT id, uuid, username, created_at FROM users WHERE id = $1`, userID,
+	).Scan(&user.ID, &user.UUID, &user.Username, &user.CreatedAt)
 
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"erro": "Usuário não encontrado"})
@@ -327,7 +351,8 @@ func (h *Handler) Logout(c *fiber.Ctx) error {
 	h.clearRefreshCookie(c)
 
 	if uid, ok2 := c.Locals("user_id").(int); ok2 {
-		h.broadcastAuthEvent("user_logout", models.User{ID: uid})
+		userUUID, _ := c.Locals("user_uuid").(string)
+		h.broadcastAuthEvent("user_logout", models.User{ID: uid, UUID: userUUID})
 	}
 
 	return c.JSON(fiber.Map{"status": "ok"})
@@ -369,10 +394,12 @@ func (h *Handler) Sessions(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"sessions": sessions})
 }
 
+// ---------- helpers internos ----------
+
 func (h *Handler) createSessionAndRespond(c *fiber.Ctx, user models.User, status int) error {
-	accessToken := h.generateAccessToken(user.ID, user.Username)
+	accessToken := h.generateAccessToken(user)
 	refreshToken := generateRefreshToken()
-	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 dias
+	expiresAt := time.Now().Add(30 * 24 * time.Hour)
 
 	_, err := h.DB.Exec(
 		`INSERT INTO sessions (user_id, refresh_token, user_agent, ip, expires_at)
@@ -394,10 +421,12 @@ func (h *Handler) createSessionAndRespond(c *fiber.Ctx, user models.User, status
 	})
 }
 
-func (h *Handler) generateAccessToken(userID int, username string) string {
+// generateAccessToken — inclui uuid no payload do JWT
+func (h *Handler) generateAccessToken(user models.User) string {
 	claims := jwt.MapClaims{
-		"user_id":    userID,
-		"username":   username,
+		"user_id":    user.ID,
+		"uuid":       user.UUID,
+		"username":   user.Username,
 		"exp":        time.Now().Add(1 * time.Hour).Unix(),
 		"iat":        time.Now().Unix(),
 		"token_type": "access",
@@ -466,6 +495,7 @@ func validatePassword(p string) error {
 	return nil
 }
 
+// broadcastAuthEvent — envia uuid em todos os eventos auth via WebSocket
 func (h *Handler) broadcastAuthEvent(eventType string, user models.User) {
 	if h.Hub == nil {
 		return
@@ -477,6 +507,7 @@ func (h *Handler) broadcastAuthEvent(eventType string, user models.User) {
 		UserID:  user.ID,
 		Data: fiber.Map{
 			"user_id":  user.ID,
+			"uuid":     user.UUID,
 			"username": user.Username,
 		},
 	})

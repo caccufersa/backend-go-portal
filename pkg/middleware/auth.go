@@ -9,23 +9,12 @@ import (
 )
 
 func AuthMiddleware(c *fiber.Ctx) error {
-	tokenStr := ""
 	auth := c.Get("Authorization")
-	if auth != "" {
-		parts := strings.Split(auth, " ")
-		if len(parts) == 2 && parts[0] == "Bearer" {
-			tokenStr = parts[1]
-		}
-	}
-
-	if tokenStr == "" {
-		tokenStr = c.Cookies("access_token")
-	}
-
-	if tokenStr == "" {
+	if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
 		return c.Status(401).JSON(fiber.Map{"erro": "Token não informado"})
 	}
 
+	tokenStr := auth[7:]
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		secret = "dev-secret-key-change-in-production"
@@ -34,15 +23,18 @@ func AuthMiddleware(c *fiber.Ctx) error {
 	token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
 		return []byte(secret), nil
 	})
-
 	if err != nil || !token.Valid {
-		return c.Status(401).JSON(fiber.Map{"erro": "Token inválido ou expirado"})
+		return c.Status(401).JSON(fiber.Map{"erro": "Token inválido"})
 	}
 
 	claims := token.Claims.(*jwt.MapClaims)
+	userID := int((*claims)["user_id"].(float64))
+	userUUID, _ := (*claims)["uuid"].(string)
+	username, _ := (*claims)["username"].(string)
 
-	c.Locals("user_id", int((*claims)["user_id"].(float64)))
-	c.Locals("username", (*claims)["username"].(string))
+	c.Locals("user_id", userID)
+	c.Locals("user_uuid", userUUID)
+	c.Locals("username", username)
 
 	return c.Next()
 }

@@ -34,7 +34,6 @@ func main() {
 	wsHub := hub.New()
 
 	h := handlers.New(db)
-	// Injecta o hub no handler para broadcasts internos (login, logout, etc.)
 	h.Hub = wsHub
 
 	app := server.NewApp("auth")
@@ -70,6 +69,23 @@ func main() {
 		})
 	})
 
+	// --- Rota para resolver UUID → user (usada por outros services) ---
+	app.Get("/internal/user/:uuid", func(c *fiber.Ctx) error {
+		uuid := c.Params("uuid")
+		var id int
+		var username string
+		var createdAt time.Time
+		err := db.QueryRow(
+			`SELECT id, username, created_at FROM users WHERE uuid = $1`, uuid,
+		).Scan(&id, &username, &createdAt)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"erro": "Usuário não encontrado"})
+		}
+		return c.JSON(fiber.Map{
+			"id": id, "uuid": uuid, "username": username, "created_at": createdAt,
+		})
+	})
+
 	// --- WebSocket: microservices conectam aqui ---
 	app.Use("/ws/hub", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
@@ -81,16 +97,13 @@ func main() {
 		wsHub.HandleServiceConn(c)
 	}))
 
-	// --- WebSocket: clientes frontend conectam aqui (com JWT) ---
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if !websocket.IsWebSocketUpgrade(c) {
 			return fiber.ErrUpgradeRequired
 		}
 
-		// autentica via query param: /ws?token=xxx
 		tokenStr := c.Query("token")
 		if tokenStr == "" {
-			// tenta pelo header Authorization
 			authHeader := c.Get("Authorization")
 			if strings.HasPrefix(authHeader, "Bearer ") {
 				tokenStr = authHeader[7:]
@@ -98,6 +111,7 @@ func main() {
 		}
 
 		userID := 0
+		userUUID := ""
 		if tokenStr != "" {
 			secret := os.Getenv("JWT_SECRET")
 			if secret == "" {
@@ -109,18 +123,22 @@ func main() {
 			if err == nil && token.Valid {
 				claims := token.Claims.(*jwt.MapClaims)
 				userID = int((*claims)["user_id"].(float64))
+				if uid, ok := (*claims)["uuid"].(string); ok {
+					userUUID = uid
+				}
 			}
 		}
 
 		c.Locals("user_id", userID)
+		c.Locals("user_uuid", userUUID)
 		return c.Next()
 	})
 	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
 		userID, _ := c.Locals("user_id").(int)
-		wsHub.HandleClientConn(c, userID)
+		userUUID, _ := c.Locals("user_uuid").(string)
+		wsHub.HandleClientConn(c, userID, userUUID)
 	}))
 
-	// --- Endpoint HTTP para broadcast (fallback / interno) ---
 	app.Post("/internal/broadcast", func(c *fiber.Ctx) error {
 		var msg hub.WSMessage
 		if err := c.BodyParser(&msg); err != nil {
@@ -141,29 +159,36 @@ func main() {
 
 func setupDatabase(db *sql.DB) {
 	schema := `
-	CREATE TABLE IF NOT EXISTS users (
-		id SERIAL PRIMARY KEY,
-		username TEXT UNIQUE NOT NULL,
-		password TEXT NOT NULL,
-		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-	);
-	CREATE TABLE IF NOT EXISTS sessions (
-		id SERIAL PRIMARY KEY,
-		user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-		refresh_token TEXT UNIQUE NOT NULL,
-		user_agent TEXT NOT NULL DEFAULT '',
-		ip TEXT NOT NULL DEFAULT '',
-		expires_at TIMESTAMP NOT NULL,
-		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-	);
-	CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-	CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(refresh_token);
-	CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
-	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
-	`
+    CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        uuid UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+        id SERIAL PRIMARY KEY,
+        user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        refresh_token TEXT UNIQUE NOT NULL,
+        user_agent TEXT NOT NULL DEFAULT '',
+        ip TEXT NOT NULL DEFAULT '',
+        expires_at TIMESTAMP NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+    CREATE INDEX IF NOT EXISTS idx_users_uuid ON users(uuid);
+    CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(refresh_token);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+    `
 	if _, err := db.Exec(schema); err != nil {
 		log.Fatal("Erro ao criar schema auth:", err)
 	}
+
+	db.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS uuid UUID UNIQUE DEFAULT gen_random_uuid()`)
+	db.Exec(`UPDATE users SET uuid = gen_random_uuid() WHERE uuid IS NULL`)
 }
 
 // limpeza periódica de sessões expiradas

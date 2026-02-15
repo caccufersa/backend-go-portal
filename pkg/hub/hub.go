@@ -9,194 +9,151 @@ import (
 	"github.com/gofiber/contrib/websocket"
 )
 
-type connInfo struct {
+type clientConn struct {
+	conn   *websocket.Conn
+	userID int
+	uuid   string
+}
+
+type serviceConn struct {
 	conn     *websocket.Conn
-	service  string   // "" = frontend client
-	channels []string // canais subscritos
-	userID   int      // > 0 se for cliente autenticado
+	identity ServiceIdentity
 }
 
 type Hub struct {
-	// conexões de clientes frontend
-	clients map[*websocket.Conn]*connInfo
-	// conexões de microservices
-	services map[*websocket.Conn]*connInfo
-
-	broadcast  chan WSMessage
-	register   chan *connInfo
-	unregister chan *websocket.Conn
-
-	mu sync.RWMutex
+	mu       sync.RWMutex
+	clients  map[*websocket.Conn]*clientConn
+	services map[*websocket.Conn]*serviceConn
 }
 
-// New cria e inicia o hub central.
 func New() *Hub {
-	h := &Hub{
-		clients:    make(map[*websocket.Conn]*connInfo),
-		services:   make(map[*websocket.Conn]*connInfo),
-		broadcast:  make(chan WSMessage, 512),
-		register:   make(chan *connInfo, 128),
-		unregister: make(chan *websocket.Conn, 128),
-	}
-	go h.run()
-	return h
-}
-
-func (h *Hub) run() {
-	for {
-		select {
-
-		case ci := <-h.register:
-			h.mu.Lock()
-			if ci.service != "" {
-				h.services[ci.conn] = ci
-				log.Printf("[hub] serviço conectado: %s (canais: %v)", ci.service, ci.channels)
-			} else {
-				h.clients[ci.conn] = ci
-				log.Printf("[hub] cliente conectado (user_id=%d)", ci.userID)
-			}
-			h.mu.Unlock()
-
-		case conn := <-h.unregister:
-			h.mu.Lock()
-			if ci, ok := h.clients[conn]; ok {
-				delete(h.clients, conn)
-				log.Printf("[hub] cliente desconectado (user_id=%d)", ci.userID)
-				conn.Close()
-			}
-			if ci, ok := h.services[conn]; ok {
-				delete(h.services, conn)
-				log.Printf("[hub] serviço desconectado: %s", ci.service)
-				conn.Close()
-			}
-			h.mu.Unlock()
-
-		case msg := <-h.broadcast:
-			if msg.SentAt.IsZero() {
-				msg.SentAt = time.Now()
-			}
-			h.fanOut(msg)
-		}
+	return &Hub{
+		clients:  make(map[*websocket.Conn]*clientConn),
+		services: make(map[*websocket.Conn]*serviceConn),
 	}
 }
 
-// fanOut envia a mensagem para todos os clientes e serviços que subscrevem o canal.
-func (h *Hub) fanOut(msg WSMessage) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		log.Println("[hub] erro marshal:", err)
-		return
-	}
-
-	h.mu.RLock()
-	// coleciona todos os conns alvo
-	targets := make([]*websocket.Conn, 0, len(h.clients)+len(h.services))
-
-	// clientes frontend — recebem tudo (ou filtram por channel no front)
-	for conn := range h.clients {
-		targets = append(targets, conn)
-	}
-
-	// serviços — só se subscrevem ao canal
-	for conn, ci := range h.services {
-		if msg.Channel == "" || containsStr(ci.channels, msg.Channel) || containsStr(ci.channels, "*") {
-			targets = append(targets, conn)
-		}
-	}
-	h.mu.RUnlock()
-
-	for _, conn := range targets {
-		go func(c *websocket.Conn) {
-			if err := c.WriteMessage(websocket.TextMessage, data); err != nil {
-				h.unregister <- c
-			}
-		}(conn)
-	}
-}
-
-// Broadcast envia uma mensagem a todo o hub.
-func (h *Hub) Broadcast(msg WSMessage) {
-	h.broadcast <- msg
-}
-
-
-// HandleServiceConn é chamado quando um microservice se conecta em /ws/hub.
-// Espera a primeira mensagem ser um JSON ServiceIdentity.
+// HandleServiceConn — um microservice conecta aqui.
+// Primeiro msg deve ser ServiceIdentity (JSON).
 func (h *Hub) HandleServiceConn(c *websocket.Conn) {
-	// ler mensagem de identify
 	_, raw, err := c.ReadMessage()
 	if err != nil {
-		log.Println("[hub] erro leitura identify:", err)
 		c.Close()
 		return
 	}
 
 	var ident ServiceIdentity
 	if err := json.Unmarshal(raw, &ident); err != nil || ident.Name == "" {
-		log.Println("[hub] identify inválido:", string(raw))
 		c.Close()
 		return
 	}
 
-	ci := &connInfo{
-		conn:     c,
-		service:  ident.Name,
-		channels: ident.Channels,
-	}
-	h.register <- ci
+	sc := &serviceConn{conn: c, identity: ident}
+	h.mu.Lock()
+	h.services[c] = sc
+	h.mu.Unlock()
 
-	defer func() { h.unregister <- c }()
+	log.Printf("[hub] service '%s' conectado (canais: %v)", ident.Name, ident.Channels)
 
-	// loop — lê mensagens de broadcast vindas do serviço
+	defer func() {
+		h.mu.Lock()
+		delete(h.services, c)
+		h.mu.Unlock()
+		c.Close()
+		log.Printf("[hub] service '%s' desconectado", ident.Name)
+	}()
+
+	// lê mensagens do service e faz broadcast
 	for {
 		_, raw, err := c.ReadMessage()
 		if err != nil {
-			break
+			return
 		}
 		var msg WSMessage
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			continue
 		}
-		if msg.Service == "" {
-			msg.Service = ident.Name
-		}
-		if msg.Channel == "" {
-			msg.Channel = ident.Name
+		if msg.SentAt.IsZero() {
+			msg.SentAt = time.Now()
 		}
 		h.Broadcast(msg)
 	}
 }
 
-// HandleClientConn é chamado quando um cliente frontend se conecta em /ws.
-// O userID vem do JWT validado no middleware.
-func (h *Hub) HandleClientConn(c *websocket.Conn, userID int) {
-	ci := &connInfo{
-		conn:   c,
-		userID: userID,
-	}
-	h.register <- ci
+// HandleClientConn — um cliente frontend conecta aqui (já autenticado).
+func (h *Hub) HandleClientConn(c *websocket.Conn, userID int, uuid string) {
+	cc := &clientConn{conn: c, userID: userID, uuid: uuid}
 
-	defer func() { h.unregister <- c }()
+	h.mu.Lock()
+	h.clients[c] = cc
+	h.mu.Unlock()
 
+	log.Printf("[hub] cliente conectado (user_id=%d, uuid=%s)", userID, uuid)
+
+	defer func() {
+		h.mu.Lock()
+		delete(h.clients, c)
+		h.mu.Unlock()
+		c.Close()
+		log.Printf("[hub] cliente desconectado (user_id=%d)", userID)
+	}()
+
+	// lê mensagens do cliente (ping/pong, ações futuras)
 	for {
-		_, _, err := c.ReadMessage()
+		_, raw, err := c.ReadMessage()
 		if err != nil {
-			break
+			return
 		}
-		// clientes frontend só leem; ignore mensagens (ou implemente chat futuramente)
+		var msg WSMessage
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			continue
+		}
+		// ignora ping silencioso
+		if msg.Type == "ping" {
+			data, _ := json.Marshal(WSMessage{Type: "pong", SentAt: time.Now()})
+			c.WriteMessage(websocket.TextMessage, data)
+			continue
+		}
+		// clientes podem enviar mensagens que são rebroadcast
+		msg.UserID = userID
+		msg.UserUUID = uuid
+		if msg.SentAt.IsZero() {
+			msg.SentAt = time.Now()
+		}
+		h.Broadcast(msg)
 	}
 }
 
-// ClientCount retorna o total de clientes + serviços conectados.
-func (h *Hub) ClientCount() (clients int, services int) {
+// Broadcast envia a mensagem para todos os clientes e services relevantes.
+func (h *Hub) Broadcast(msg WSMessage) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, cc := range h.clients {
+		cc.conn.WriteMessage(websocket.TextMessage, data)
+	}
+	for _, sc := range h.services {
+		if matchChannel(sc.identity.Channels, msg.Channel) {
+			sc.conn.WriteMessage(websocket.TextMessage, data)
+		}
+	}
+}
+
+// ClientCount retorna (frontend_clients, services).
+func (h *Hub) ClientCount() (int, int) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients), len(h.services)
 }
 
-func containsStr(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
+func matchChannel(subscribed []string, channel string) bool {
+	for _, ch := range subscribed {
+		if ch == "*" || ch == channel {
 			return true
 		}
 	}
