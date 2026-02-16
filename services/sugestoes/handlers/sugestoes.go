@@ -4,31 +4,34 @@ import (
 	"database/sql"
 	"log"
 
+	"cacc/pkg/broker"
+	"cacc/pkg/envelope"
 	"cacc/services/sugestoes/models"
-
-	"github.com/gofiber/fiber/v2"
 )
 
 type SugestaoHandler struct {
-	DB *sql.DB
-
-	OnCreate func(s models.Sugestao)
+	DB     *sql.DB
+	broker *broker.Broker
 }
 
-func New(db *sql.DB) *SugestaoHandler {
-	return &SugestaoHandler{DB: db}
+func New(db *sql.DB, b *broker.Broker) *SugestaoHandler {
+	return &SugestaoHandler{DB: db, broker: b}
 }
 
-func (h *SugestaoHandler) Listar(c *fiber.Ctx) error {
-	query := `
-		SELECT id, texto, data_criacao, COALESCE(author, 'Anônimo'), COALESCE(categoria, 'Geral')
-		FROM sugestoes 
-		ORDER BY id DESC
-	`
-	rows, err := h.DB.Query(query)
+func (h *SugestaoHandler) RegisterActions() {
+	h.broker.On("sugestoes.list", h.listar)
+	h.broker.On("sugestoes.create", h.criar)
+}
+
+func (h *SugestaoHandler) listar(env envelope.Envelope) {
+	rows, err := h.DB.Query(
+		`SELECT id, texto, data_criacao, COALESCE(author, 'Anônimo'), COALESCE(categoria, 'Geral')
+		 FROM sugestoes ORDER BY id DESC`,
+	)
 	if err != nil {
 		log.Println("Erro Query:", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"erro": "Erro no banco"})
+		h.broker.ReplyError("gateway:replies", env, 500, "Erro no banco")
+		return
 	}
 	defer rows.Close()
 
@@ -36,38 +39,43 @@ func (h *SugestaoHandler) Listar(c *fiber.Ctx) error {
 	for rows.Next() {
 		var s models.Sugestao
 		if err := rows.Scan(&s.ID, &s.Texto, &s.CreatedAt, &s.Author, &s.Categoria); err != nil {
-			log.Println("Erro Scan:", err)
 			continue
 		}
 		lista = append(lista, s)
 	}
 
-	return c.JSON(lista)
+	h.broker.Reply("gateway:replies", env, lista)
 }
 
-func (h *SugestaoHandler) Criar(c *fiber.Ctx) error {
-	var s models.Sugestao
-	if err := c.BodyParser(&s); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"erro": "JSON inválido"})
+func (h *SugestaoHandler) criar(env envelope.Envelope) {
+	req, err := envelope.ParseData[models.Sugestao](env)
+	if err != nil {
+		h.broker.ReplyError("gateway:replies", env, 400, "JSON inválido")
+		return
 	}
 
-	if s.Author == "" {
-		s.Author = "Anônimo"
+	if req.Author == "" {
+		if env.Username != "" {
+			req.Author = env.Username
+		} else {
+			req.Author = "Anônimo"
+		}
 	}
-	if s.Categoria == "" {
-		s.Categoria = "Geral"
+	if req.Categoria == "" {
+		req.Categoria = "Geral"
 	}
 
-	sqlStatement := `INSERT INTO sugestoes (texto, author, categoria) VALUES ($1, $2, $3) RETURNING id, data_criacao`
-	err := h.DB.QueryRow(sqlStatement, s.Texto, s.Author, s.Categoria).Scan(&s.ID, &s.CreatedAt)
+	err = h.DB.QueryRow(
+		`INSERT INTO sugestoes (texto, author, categoria) VALUES ($1, $2, $3) RETURNING id, data_criacao`,
+		req.Texto, req.Author, req.Categoria,
+	).Scan(&req.ID, &req.CreatedAt)
+
 	if err != nil {
 		log.Println("Erro Insert:", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"erro": "Erro ao salvar"})
+		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao salvar")
+		return
 	}
 
-	if h.OnCreate != nil {
-		go h.OnCreate(s)
-	}
-
-	return c.Status(fiber.StatusCreated).JSON(s)
+	h.broker.Reply("gateway:replies", env, req)
+	h.broker.Broadcast("gateway:broadcast", "new_sugestao", "sugestoes", req)
 }

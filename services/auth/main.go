@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"cacc/pkg/broker"
 	"cacc/pkg/database"
 	"cacc/pkg/hub"
 	"cacc/pkg/middleware"
@@ -30,15 +31,15 @@ func main() {
 	setupDatabase(db)
 	cleanExpiredSessions(db)
 
-	// --- Hub central de WebSocket ---
-	wsHub := hub.New()
+	b := broker.New()
+	defer b.Close()
 
-	h := handlers.New(db)
-	h.Hub = wsHub
+	wsHub := hub.New(b)
+
+	h := handlers.New(db, b)
 
 	app := server.NewApp("auth")
 
-	// --- rotas públicas ---
 	auth := app.Group("/auth")
 	auth.Post("/register", limiter.New(limiter.Config{
 		Max: 10, Expiration: 1 * time.Minute,
@@ -53,23 +54,20 @@ func main() {
 	auth.Post("/refresh", h.Refresh)
 	auth.Get("/session", h.Session)
 
-	// --- rotas protegidas ---
 	protected := auth.Group("", middleware.AuthMiddleware)
 	protected.Get("/me", h.Me)
 	protected.Post("/logout", h.Logout)
 	protected.Post("/logout-all", h.LogoutAll)
 	protected.Get("/sessions", h.Sessions)
 
-	// --- Hub status (protegido) ---
 	protected.Get("/hub/status", func(c *fiber.Ctx) error {
-		clients, services := wsHub.ClientCount()
-		return c.JSON(fiber.Map{
-			"clients":  clients,
-			"services": services,
-		})
+		return c.JSON(fiber.Map{"clients": wsHub.ClientCount()})
 	})
 
-	// --- Rota para resolver UUID → user (usada por outros services) ---
+	api := app.Group("/api/noticias")
+	api.Post("/fetch-link-meta", handlers.FetchLinkMeta)
+	api.Post("/upload/image", handlers.UploadImage)
+
 	app.Get("/internal/user/:uuid", func(c *fiber.Ctx) error {
 		uuid := c.Params("uuid")
 		var id int
@@ -86,17 +84,6 @@ func main() {
 		})
 	})
 
-	// --- WebSocket: microservices conectam aqui ---
-	app.Use("/ws/hub", func(c *fiber.Ctx) error {
-		if websocket.IsWebSocketUpgrade(c) {
-			return c.Next()
-		}
-		return fiber.ErrUpgradeRequired
-	})
-	app.Get("/ws/hub", websocket.New(func(c *websocket.Conn) {
-		wsHub.HandleServiceConn(c)
-	}))
-
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if !websocket.IsWebSocketUpgrade(c) {
 			return fiber.ErrUpgradeRequired
@@ -112,6 +99,7 @@ func main() {
 
 		userID := 0
 		userUUID := ""
+		username := ""
 		if tokenStr != "" {
 			secret := os.Getenv("JWT_SECRET")
 			if secret == "" {
@@ -126,34 +114,31 @@ func main() {
 				if uid, ok := (*claims)["uuid"].(string); ok {
 					userUUID = uid
 				}
+				if uname, ok := (*claims)["username"].(string); ok {
+					username = uname
+				}
 			}
 		}
 
 		c.Locals("user_id", userID)
 		c.Locals("user_uuid", userUUID)
+		c.Locals("username", username)
 		return c.Next()
 	})
+
 	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
 		userID, _ := c.Locals("user_id").(int)
 		userUUID, _ := c.Locals("user_uuid").(string)
-		wsHub.HandleClientConn(c, userID, userUUID)
+		username, _ := c.Locals("username").(string)
+		wsHub.HandleClientConn(c, userID, userUUID, username)
 	}))
-
-	app.Post("/internal/broadcast", func(c *fiber.Ctx) error {
-		var msg hub.WSMessage
-		if err := c.BodyParser(&msg); err != nil {
-			return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
-		}
-		wsHub.Broadcast(msg)
-		return c.JSON(fiber.Map{"status": "ok"})
-	})
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8082"
 	}
 
-	log.Println("Auth Hub rodando na porta " + port)
+	log.Println("Auth Gateway rodando na porta " + port)
 	log.Fatal(app.Listen(":" + port))
 }
 

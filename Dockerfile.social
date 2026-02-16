@@ -9,5 +9,4 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /social ./services/social
 FROM alpine:3.20
 RUN apk --no-cache add ca-certificates
 COPY --from=builder /social /social
-EXPOSE 8081
 CMD ["/social"]

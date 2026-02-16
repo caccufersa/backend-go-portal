@@ -7,39 +7,52 @@ import (
 	"strconv"
 	"strings"
 
+	"cacc/pkg/broker"
+	"cacc/pkg/envelope"
 	"cacc/services/noticias/models"
 
-	"github.com/gofiber/fiber/v2"
 	"github.com/lib/pq"
 )
 
 type Handler struct {
-	DB          *sql.DB
-	OnBroadcast func(msgType string, data interface{})
+	DB     *sql.DB
+	broker *broker.Broker
 }
 
-func New(db *sql.DB) *Handler {
-	return &Handler{DB: db}
+func New(db *sql.DB, b *broker.Broker) *Handler {
+	return &Handler{DB: db, broker: b}
 }
 
-func (h *Handler) Listar(c *fiber.Ctx) error {
-	limit := c.QueryInt("limit", 20)
-	if limit > 100 {
-		limit = 100
+func (h *Handler) RegisterActions() {
+	h.broker.On("noticias.list", h.listar)
+	h.broker.On("noticias.get", h.buscarPorID)
+	h.broker.On("noticias.destaques", h.destaques)
+	h.broker.On("noticias.create", h.criar)
+	h.broker.On("noticias.update", h.atualizar)
+	h.broker.On("noticias.delete", h.deletar)
+}
+
+func (h *Handler) listar(env envelope.Envelope) {
+	type listReq struct {
+		Limit     int    `json:"limit"`
+		Offset    int    `json:"offset"`
+		Categoria string `json:"categoria"`
 	}
-	offset := c.QueryInt("offset", 0)
-	categoria := c.Query("categoria")
+	req, _ := envelope.ParseData[listReq](env)
+	if req.Limit <= 0 || req.Limit > 100 {
+		req.Limit = 20
+	}
 
 	var rows *sql.Rows
 	var err error
 
-	if categoria != "" {
+	if req.Categoria != "" {
 		rows, err = h.DB.Query(
-			`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque, 
+			`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
 			 COALESCE(tags, '{}'), created_at, updated_at
 			 FROM noticias WHERE categoria = $1
 			 ORDER BY destaque DESC, created_at DESC LIMIT $2 OFFSET $3`,
-			categoria, limit, offset,
+			req.Categoria, req.Limit, req.Offset,
 		)
 	} else {
 		rows, err = h.DB.Query(
@@ -47,124 +60,94 @@ func (h *Handler) Listar(c *fiber.Ctx) error {
 			 COALESCE(tags, '{}'), created_at, updated_at
 			 FROM noticias
 			 ORDER BY destaque DESC, created_at DESC LIMIT $1 OFFSET $2`,
-			limit, offset,
+			req.Limit, req.Offset,
 		)
 	}
 
 	if err != nil {
 		log.Println("Erro query noticias:", err)
-		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao buscar notícias"})
+		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao buscar notícias")
+		return
 	}
 	defer rows.Close()
 
-	noticias := []models.Noticia{}
-	for rows.Next() {
-		var n models.Noticia
-		var tags pq.StringArray
-		if err := rows.Scan(&n.ID, &n.Titulo, &n.Conteudo, &n.Resumo, &n.Author,
-			&n.Categoria, &n.ImageURL, &n.Destaque, &tags, &n.CreatedAt, &n.UpdatedAt); err != nil {
-			log.Println("Erro scan noticia:", err)
-			continue
-		}
-		n.Tags = tags
-
-		var editorData models.EditorJSData
-		if err := json.Unmarshal([]byte(n.Conteudo), &editorData); err == nil {
-			n.ConteudoObj = &editorData
-		}
-
-		noticias = append(noticias, n)
-	}
-
-	return c.JSON(noticias)
+	noticias := h.scanNoticias(rows)
+	h.broker.Reply("gateway:replies", env, noticias)
 }
 
-func (h *Handler) BuscarPorID(c *fiber.Ctx) error {
-	id, err := strconv.Atoi(c.Params("id"))
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"erro": "ID inválido"})
+func (h *Handler) buscarPorID(env envelope.Envelope) {
+	type getReq struct {
+		ID int `json:"id"`
+	}
+	req, _ := envelope.ParseData[getReq](env)
+	if req.ID <= 0 {
+		h.broker.ReplyError("gateway:replies", env, 400, "ID inválido")
+		return
 	}
 
 	var n models.Noticia
 	var tags pq.StringArray
-	err = h.DB.QueryRow(
-		`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque, 
+	err := h.DB.QueryRow(
+		`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
 		 COALESCE(tags, '{}'), created_at, updated_at
-		 FROM noticias WHERE id = $1`, id,
+		 FROM noticias WHERE id = $1`, req.ID,
 	).Scan(&n.ID, &n.Titulo, &n.Conteudo, &n.Resumo, &n.Author,
 		&n.Categoria, &n.ImageURL, &n.Destaque, &tags, &n.CreatedAt, &n.UpdatedAt)
 
 	if err == sql.ErrNoRows {
-		return c.Status(404).JSON(fiber.Map{"erro": "Notícia não encontrada"})
+		h.broker.ReplyError("gateway:replies", env, 404, "Notícia não encontrada")
+		return
 	}
 	if err != nil {
-		log.Println("Erro query noticia:", err)
-		return c.Status(500).JSON(fiber.Map{"erro": "Erro interno"})
+		h.broker.ReplyError("gateway:replies", env, 500, "Erro interno")
+		return
 	}
 
 	n.Tags = tags
-
-	var editorData models.EditorJSData
-	if err := json.Unmarshal([]byte(n.Conteudo), &editorData); err == nil {
-		n.ConteudoObj = &editorData
-	}
-
-	return c.JSON(n)
+	h.parseEditorJS(&n)
+	h.broker.Reply("gateway:replies", env, n)
 }
 
-func (h *Handler) Destaques(c *fiber.Ctx) error {
+func (h *Handler) destaques(env envelope.Envelope) {
 	rows, err := h.DB.Query(
-		`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque, 
+		`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
 		 COALESCE(tags, '{}'), created_at, updated_at
 		 FROM noticias WHERE destaque = true
 		 ORDER BY created_at DESC LIMIT 10`,
 	)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao buscar destaques"})
+		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao buscar destaques")
+		return
 	}
 	defer rows.Close()
 
-	noticias := []models.Noticia{}
-	for rows.Next() {
-		var n models.Noticia
-		var tags pq.StringArray
-		if err := rows.Scan(&n.ID, &n.Titulo, &n.Conteudo, &n.Resumo, &n.Author,
-			&n.Categoria, &n.ImageURL, &n.Destaque, &tags, &n.CreatedAt, &n.UpdatedAt); err != nil {
-			continue
-		}
-		n.Tags = tags
-
-		var editorData models.EditorJSData
-		if err := json.Unmarshal([]byte(n.Conteudo), &editorData); err == nil {
-			n.ConteudoObj = &editorData
-		}
-
-		noticias = append(noticias, n)
-	}
-
-	return c.JSON(noticias)
+	noticias := h.scanNoticias(rows)
+	h.broker.Reply("gateway:replies", env, noticias)
 }
 
-func (h *Handler) Criar(c *fiber.Ctx) error {
+func (h *Handler) criar(env envelope.Envelope) {
 	var req models.CriarNoticiaRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		h.broker.ReplyError("gateway:replies", env, 400, "JSON inválido")
+		return
 	}
 
 	req.Titulo = strings.TrimSpace(req.Titulo)
-
 	if req.Titulo == "" || req.Conteudo == nil {
-		return c.Status(400).JSON(fiber.Map{"erro": "Título e conteúdo são obrigatórios"})
+		h.broker.ReplyError("gateway:replies", env, 400, "Título e conteúdo são obrigatórios")
+		return
 	}
 
 	conteudoStr, err := models.ParseConteudo(req.Conteudo)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"erro": "Formato de conteúdo inválido"})
+		h.broker.ReplyError("gateway:replies", env, 400, "Formato de conteúdo inválido")
+		return
 	}
 
 	conteudoStr = strings.TrimSpace(conteudoStr)
 	if conteudoStr == "" {
-		return c.Status(400).JSON(fiber.Map{"erro": "Conteúdo não pode ser vazio"})
+		h.broker.ReplyError("gateway:replies", env, 400, "Conteúdo não pode ser vazio")
+		return
 	}
 
 	if req.Categoria == "" {
@@ -172,40 +155,12 @@ func (h *Handler) Criar(c *fiber.Ctx) error {
 	}
 
 	if req.Resumo == "" {
-		var editorData models.EditorJSData
-		if err := json.Unmarshal([]byte(conteudoStr), &editorData); err == nil {
-			resumoText := ""
-			for _, block := range editorData.Blocks {
-				if blockType, ok := block["type"].(string); ok && (blockType == "paragraph" || blockType == "header") {
-					if data, ok := block["data"].(map[string]interface{}); ok {
-						if text, ok := data["text"].(string); ok {
-							resumoText += text + " "
-							if len(resumoText) > 200 {
-								break
-							}
-						}
-					}
-				}
-			}
-			if len(resumoText) > 200 {
-				req.Resumo = resumoText[:200] + "..."
-			} else if resumoText != "" {
-				req.Resumo = resumoText
-			} else {
-				req.Resumo = "Nova notícia"
-			}
-		} else {
-			if len(conteudoStr) > 200 {
-				req.Resumo = conteudoStr[:200] + "..."
-			} else {
-				req.Resumo = conteudoStr
-			}
-		}
+		req.Resumo = h.gerarResumo(conteudoStr)
 	}
 
 	if req.Author == "" {
-		if username, ok := c.Locals("username").(string); ok {
-			req.Author = username
+		if env.Username != "" {
+			req.Author = env.Username
 		} else {
 			req.Author = "Anônimo"
 		}
@@ -216,7 +171,7 @@ func (h *Handler) Criar(c *fiber.Ctx) error {
 	err = h.DB.QueryRow(
 		`INSERT INTO noticias (titulo, conteudo, resumo, author, categoria, image_url, destaque, tags)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque, 
+		 RETURNING id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
 		 COALESCE(tags, '{}'), created_at, updated_at`,
 		req.Titulo, conteudoStr, req.Resumo, req.Author, req.Categoria, req.ImageURL, req.Destaque, pq.Array(req.Tags),
 	).Scan(&n.ID, &n.Titulo, &n.Conteudo, &n.Resumo, &n.Author,
@@ -224,32 +179,31 @@ func (h *Handler) Criar(c *fiber.Ctx) error {
 
 	if err != nil {
 		log.Println("Erro insert noticia:", err)
-		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao criar notícia"})
+		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao criar notícia")
+		return
 	}
 
 	n.Tags = tags
+	h.parseEditorJS(&n)
 
-	var editorData models.EditorJSData
-	if err := json.Unmarshal([]byte(n.Conteudo), &editorData); err == nil {
-		n.ConteudoObj = &editorData
-	}
-
-	if h.OnBroadcast != nil {
-		go h.OnBroadcast("new_noticia", n)
-	}
-
-	return c.Status(201).JSON(n)
+	h.broker.Reply("gateway:replies", env, n)
+	h.broker.Broadcast("gateway:broadcast", "new_noticia", "noticias", n)
 }
 
-func (h *Handler) Atualizar(c *fiber.Ctx) error {
-	id, err := strconv.Atoi(c.Params("id"))
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"erro": "ID inválido"})
+func (h *Handler) atualizar(env envelope.Envelope) {
+	type updateEnv struct {
+		ID int `json:"id"`
+		models.AtualizarNoticiaRequest
+	}
+	var req updateEnv
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		h.broker.ReplyError("gateway:replies", env, 400, "JSON inválido")
+		return
 	}
 
-	var req models.AtualizarNoticiaRequest
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
+	if req.ID <= 0 {
+		h.broker.ReplyError("gateway:replies", env, 400, "ID inválido")
+		return
 	}
 
 	sets := []string{}
@@ -264,7 +218,8 @@ func (h *Handler) Atualizar(c *fiber.Ctx) error {
 	if req.Conteudo != nil {
 		conteudoStr, err := models.ParseConteudo(req.Conteudo)
 		if err != nil {
-			return c.Status(400).JSON(fiber.Map{"erro": "Formato de conteúdo inválido"})
+			h.broker.ReplyError("gateway:replies", env, 400, "Formato de conteúdo inválido")
+			return
 		}
 		sets = append(sets, "conteudo = $"+strconv.Itoa(argIdx))
 		args = append(args, conteudoStr)
@@ -297,46 +252,117 @@ func (h *Handler) Atualizar(c *fiber.Ctx) error {
 	}
 
 	if len(sets) == 0 {
-		return c.Status(400).JSON(fiber.Map{"erro": "Nenhum campo para atualizar"})
+		h.broker.ReplyError("gateway:replies", env, 400, "Nenhum campo para atualizar")
+		return
 	}
 
 	sets = append(sets, "updated_at = NOW()")
 	query := "UPDATE noticias SET " + strings.Join(sets, ", ") + " WHERE id = $" + strconv.Itoa(argIdx)
-	args = append(args, id)
+	args = append(args, req.ID)
 
 	result, err := h.DB.Exec(query, args...)
 	if err != nil {
 		log.Println("Erro update noticia:", err)
-		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao atualizar"})
+		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao atualizar")
+		return
 	}
 
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return c.Status(404).JSON(fiber.Map{"erro": "Notícia não encontrada"})
+	rowsAff, _ := result.RowsAffected()
+	if rowsAff == 0 {
+		h.broker.ReplyError("gateway:replies", env, 404, "Notícia não encontrada")
+		return
 	}
 
-	return h.BuscarPorID(c)
+	var n models.Noticia
+	var tags pq.StringArray
+	h.DB.QueryRow(
+		`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
+		 COALESCE(tags, '{}'), created_at, updated_at
+		 FROM noticias WHERE id = $1`, req.ID,
+	).Scan(&n.ID, &n.Titulo, &n.Conteudo, &n.Resumo, &n.Author,
+		&n.Categoria, &n.ImageURL, &n.Destaque, &tags, &n.CreatedAt, &n.UpdatedAt)
+	n.Tags = tags
+	h.parseEditorJS(&n)
+
+	h.broker.Reply("gateway:replies", env, n)
 }
 
-func (h *Handler) Deletar(c *fiber.Ctx) error {
-	id, err := strconv.Atoi(c.Params("id"))
+func (h *Handler) deletar(env envelope.Envelope) {
+	type deleteReq struct {
+		ID int `json:"id"`
+	}
+	req, _ := envelope.ParseData[deleteReq](env)
+	if req.ID <= 0 {
+		h.broker.ReplyError("gateway:replies", env, 400, "ID inválido")
+		return
+	}
+
+	result, err := h.DB.Exec(`DELETE FROM noticias WHERE id = $1`, req.ID)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"erro": "ID inválido"})
+		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao deletar")
+		return
 	}
 
-	result, err := h.DB.Exec(`DELETE FROM noticias WHERE id = $1`, id)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao deletar"})
+	rowsAff, _ := result.RowsAffected()
+	if rowsAff == 0 {
+		h.broker.ReplyError("gateway:replies", env, 404, "Notícia não encontrada")
+		return
 	}
 
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return c.Status(404).JSON(fiber.Map{"erro": "Notícia não encontrada"})
-	}
+	payload := map[string]interface{}{"id": req.ID, "status": "ok"}
+	h.broker.Reply("gateway:replies", env, payload)
+	h.broker.Broadcast("gateway:broadcast", "noticia_deleted", "noticias", map[string]int{"id": req.ID})
+}
 
-	if h.OnBroadcast != nil {
-		go h.OnBroadcast("noticia_deleted", fiber.Map{"id": id})
+func (h *Handler) scanNoticias(rows *sql.Rows) []models.Noticia {
+	noticias := []models.Noticia{}
+	for rows.Next() {
+		var n models.Noticia
+		var tags pq.StringArray
+		if err := rows.Scan(&n.ID, &n.Titulo, &n.Conteudo, &n.Resumo, &n.Author,
+			&n.Categoria, &n.ImageURL, &n.Destaque, &tags, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			continue
+		}
+		n.Tags = tags
+		h.parseEditorJS(&n)
+		noticias = append(noticias, n)
 	}
+	return noticias
+}
 
-	return c.JSON(fiber.Map{"status": "ok", "message": "Notícia deletada"})
+func (h *Handler) parseEditorJS(n *models.Noticia) {
+	var editorData models.EditorJSData
+	if err := json.Unmarshal([]byte(n.Conteudo), &editorData); err == nil {
+		n.ConteudoObj = &editorData
+	}
+}
+
+func (h *Handler) gerarResumo(conteudoStr string) string {
+	var editorData models.EditorJSData
+	if err := json.Unmarshal([]byte(conteudoStr), &editorData); err == nil {
+		resumoText := ""
+		for _, block := range editorData.Blocks {
+			if blockType, ok := block["type"].(string); ok && (blockType == "paragraph" || blockType == "header") {
+				if data, ok := block["data"].(map[string]interface{}); ok {
+					if text, ok := data["text"].(string); ok {
+						resumoText += text + " "
+						if len(resumoText) > 200 {
+							break
+						}
+					}
+				}
+			}
+		}
+		if len(resumoText) > 200 {
+			return resumoText[:200] + "..."
+		}
+		if resumoText != "" {
+			return resumoText
+		}
+		return "Nova notícia"
+	}
+	if len(conteudoStr) > 200 {
+		return conteudoStr[:200] + "..."
+	}
+	return conteudoStr
 }

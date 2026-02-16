@@ -8,5 +8,4 @@ RUN CGO_ENABLED=0 go build -o /bin/noticias ./services/noticias
 FROM alpine:3.20
 RUN apk --no-cache add ca-certificates
 COPY --from=builder /bin/noticias /bin/noticias
-EXPOSE 8083
 CMD ["/bin/noticias"]

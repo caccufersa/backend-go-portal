@@ -9,5 +9,4 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /sugestoes ./services/sugestoes
 FROM alpine:3.20
 RUN apk --no-cache add ca-certificates
 COPY --from=builder /sugestoes /sugestoes
-EXPOSE 8080
 CMD ["/sugestoes"]

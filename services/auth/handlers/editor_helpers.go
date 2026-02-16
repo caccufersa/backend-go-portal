@@ -25,32 +25,21 @@ type Image struct {
 	URL string `json:"url"`
 }
 
-func (h *Handler) FetchLinkMeta(c *fiber.Ctx) error {
+func FetchLinkMeta(c *fiber.Ctx) error {
 	var req struct {
 		URL string `json:"url"`
 	}
 
-	if err := c.BodyParser(&req); err != nil {
+	if err := c.BodyParser(&req); err != nil || req.URL == "" {
 		return c.Status(400).JSON(fiber.Map{"success": 0, "erro": "URL inválida"})
 	}
 
-	if req.URL == "" {
-		return c.Status(400).JSON(fiber.Map{"success": 0, "erro": "URL é obrigatória"})
-	}
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(req.URL)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": 0, "erro": "Erro ao buscar URL"})
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
+	if err != nil || resp.StatusCode != http.StatusOK {
 		return c.Status(500).JSON(fiber.Map{"success": 0, "erro": "URL não acessível"})
 	}
+	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -58,31 +47,39 @@ func (h *Handler) FetchLinkMeta(c *fiber.Ctx) error {
 	}
 
 	html := string(body)
-
 	title := extractMetaTag(html, "og:title")
 	if title == "" {
 		title = extractTitleTag(html)
 	}
-
 	description := extractMetaTag(html, "og:description")
 	if description == "" {
 		description = extractMetaTag(html, "description")
 	}
-
 	imageURL := extractMetaTag(html, "og:image")
 
-	metadata := LinkMetadata{
+	return c.JSON(LinkMetadata{
 		Success: 1,
 		Meta: Meta{
 			Title:       title,
 			Description: description,
-			Image: Image{
-				URL: imageURL,
-			},
+			Image:       Image{URL: imageURL},
 		},
+	})
+}
+
+func UploadImage(c *fiber.Ctx) error {
+	file, err := c.FormFile("image")
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": 0, "erro": "Nenhuma imagem fornecida"})
 	}
 
-	return c.JSON(metadata)
+	contentType := file.Header.Get("Content-Type")
+	if !strings.HasPrefix(contentType, "image/") {
+		return c.Status(400).JSON(fiber.Map{"success": 0, "erro": "Arquivo não é uma imagem"})
+	}
+
+	imageURL := "https://example.com/uploads/" + file.Filename
+	return c.JSON(fiber.Map{"success": 1, "file": fiber.Map{"url": imageURL}})
 }
 
 func extractMetaTag(html, property string) string {
@@ -100,7 +97,6 @@ func extractMetaTag(html, property string) string {
 			return strings.TrimSpace(matches[1])
 		}
 	}
-
 	return ""
 }
 
@@ -111,31 +107,4 @@ func extractTitleTag(html string) string {
 		return strings.TrimSpace(matches[1])
 	}
 	return ""
-}
-
-func (h *Handler) UploadImage(c *fiber.Ctx) error {
-	file, err := c.FormFile("image")
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{
-			"success": 0,
-			"erro":    "Nenhuma imagem fornecida",
-		})
-	}
-
-	contentType := file.Header.Get("Content-Type")
-	if !strings.HasPrefix(contentType, "image/") {
-		return c.Status(400).JSON(fiber.Map{
-			"success": 0,
-			"erro":    "Arquivo não é uma imagem",
-		})
-	}
-
-	imageURL := "https://example.com/uploads/" + file.Filename
-
-	return c.JSON(fiber.Map{
-		"success": 1,
-		"file": fiber.Map{
-			"url": imageURL,
-		},
-	})
 }

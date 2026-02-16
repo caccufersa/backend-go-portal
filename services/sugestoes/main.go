@@ -3,60 +3,42 @@ package main
 import (
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"cacc/pkg/broker"
 	"cacc/pkg/database"
-	"cacc/pkg/hub"
-	"cacc/pkg/server"
 	"cacc/services/sugestoes/handlers"
-	"cacc/services/sugestoes/models"
 )
 
 func main() {
 	db := database.Connect()
 	defer db.Close()
 
-	queryCriaTabela := `
+	db.Exec(`
 	CREATE TABLE IF NOT EXISTS sugestoes (
 		id SERIAL PRIMARY KEY,
 		texto TEXT NOT NULL,
 		data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		author TEXT DEFAULT 'Anônimo',
 		categoria TEXT DEFAULT 'Geral'
-	);`
-	if _, err := db.Exec(queryCriaTabela); err != nil {
-		log.Fatal("Erro Create Table:", err)
-	}
+	)`)
 	db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT`)
 	db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS categoria TEXT DEFAULT 'Geral'`)
 
-	// --- Conecta ao hub central (auth) via WebSocket ---
-	hubURL := os.Getenv("AUTH_HUB_URL")
-	if hubURL == "" {
-		hubURL = "ws://localhost:8082/ws/hub"
-	}
+	b := broker.New()
+	defer b.Close()
 
-	hubClient := hub.NewClient(hubURL, "sugestoes", []string{"*"})
-	go hubClient.Connect()
-	defer hubClient.Close()
+	h := handlers.New(db, b)
+	h.RegisterActions()
 
-	h := handlers.New(db)
+	b.Subscribe("service:sugestoes")
 
-	// Broadcast via hub central (substitui o HTTP POST ao social)
-	h.OnCreate = func(s models.Sugestao) {
-		hubClient.Broadcast("new_sugestao", "sugestoes", s)
-	}
+	log.Println("Sugestoes worker listening on service:sugestoes")
 
-	app := server.NewApp("sugestoes")
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
 
-	api := app.Group("/api")
-	api.Get("/sugestoes", h.Listar)
-	api.Post("/sugestoes", h.Criar)
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	log.Println("Serviço Sugestões rodando na porta " + port)
-	log.Fatal(app.Listen(":" + port))
+	log.Println("Sugestoes worker shutting down")
 }

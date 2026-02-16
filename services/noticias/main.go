@@ -4,15 +4,12 @@ import (
 	"database/sql"
 	"log"
 	"os"
-	"time"
+	"os/signal"
+	"syscall"
 
+	"cacc/pkg/broker"
 	"cacc/pkg/database"
-	"cacc/pkg/hub"
-	"cacc/pkg/server"
 	"cacc/services/noticias/handlers"
-
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/limiter"
 )
 
 func main() {
@@ -21,67 +18,24 @@ func main() {
 
 	db.SetMaxOpenConns(15)
 	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
 
 	setupDatabase(db)
 
-	// --- Conecta ao hub central (auth) via WebSocket ---
-	hubURL := os.Getenv("AUTH_HUB_URL")
-	if hubURL == "" {
-		hubURL = "ws://localhost:8082/ws/hub"
-	}
+	b := broker.New()
+	defer b.Close()
 
-	hubClient := hub.NewClient(hubURL, "noticias", []string{"*"})
-	go hubClient.Connect()
-	defer hubClient.Close()
+	h := handlers.New(db, b)
+	h.RegisterActions()
 
-	h := handlers.New(db)
+	b.Subscribe("service:noticias")
 
-	// Broadcast via hub central
-	h.OnBroadcast = func(msgType string, data interface{}) {
-		hubClient.Broadcast(msgType, "noticias", data)
-	}
+	log.Println("Noticias worker listening on service:noticias")
 
-	app := server.NewApp("noticias")
-	app.Use(limiter.New(limiter.Config{
-		Max:        100,
-		Expiration: 1 * time.Minute,
-	}))
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
 
-	api := app.Group("/api/noticias")
-
-	api.Get("/", h.Listar)
-	api.Get("/destaques", h.Destaques)
-	api.Get("/:id", h.BuscarPorID)
-
-	// Endpoints para suporte ao Editor.js
-	api.Post("/fetch-link-meta", h.FetchLinkMeta)
-	api.Post("/upload/image", h.UploadImage)
-
-	protegido := api.Group("", apiKeyMiddleware)
-	protegido.Post("/", h.Criar)
-	protegido.Put("/:id", h.Atualizar)
-	protegido.Delete("/:id", h.Deletar)
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8083"
-	}
-
-	log.Println("Notícias rodando na porta " + port)
-	log.Fatal(app.Listen(":" + port))
-}
-
-func apiKeyMiddleware(c *fiber.Ctx) error {
-	apiKey := c.Get("X-API-Key")
-
-	expectedKey := os.Getenv("NOTICIAS_API_KEY")
-
-	if apiKey != expectedKey {
-		return c.Status(401).JSON(fiber.Map{"erro": "API key inválida"})
-	}
-
-	return c.Next()
+	log.Println("Noticias worker shutting down")
 }
 
 func setupDatabase(db *sql.DB) {

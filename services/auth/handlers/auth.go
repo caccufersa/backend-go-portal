@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode"
 
-	"cacc/pkg/hub"
+	"cacc/pkg/broker"
 	"cacc/services/auth/models"
 
 	"github.com/gofiber/fiber/v2"
@@ -93,17 +93,17 @@ func (c *UserCache) cleanup() {
 
 type Handler struct {
 	DB        *sql.DB
-	Hub       *hub.Hub
+	broker    *broker.Broker
 	jwtSecret string
 	cache     *UserCache
 }
 
-func New(db *sql.DB) *Handler {
+func New(db *sql.DB, b *broker.Broker) *Handler {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		secret = "dev-secret-key-change-in-production"
 	}
-	return &Handler{DB: db, jwtSecret: secret, cache: NewCache()}
+	return &Handler{DB: db, broker: b, jwtSecret: secret, cache: NewCache()}
 }
 
 func (h *Handler) Register(c *fiber.Ctx) error {
@@ -394,8 +394,6 @@ func (h *Handler) Sessions(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"sessions": sessions})
 }
 
-// ---------- helpers internos ----------
-
 func (h *Handler) createSessionAndRespond(c *fiber.Ctx, user models.User, status int) error {
 	accessToken := h.generateAccessToken(user)
 	refreshToken := generateRefreshToken()
@@ -421,7 +419,6 @@ func (h *Handler) createSessionAndRespond(c *fiber.Ctx, user models.User, status
 	})
 }
 
-// generateAccessToken — inclui uuid no payload do JWT
 func (h *Handler) generateAccessToken(user models.User) string {
 	claims := jwt.MapClaims{
 		"user_id":    user.ID,
@@ -495,20 +492,13 @@ func validatePassword(p string) error {
 	return nil
 }
 
-// broadcastAuthEvent — envia uuid em todos os eventos auth via WebSocket
 func (h *Handler) broadcastAuthEvent(eventType string, user models.User) {
-	if h.Hub == nil {
+	if h.broker == nil {
 		return
 	}
-	go h.Hub.Broadcast(hub.WSMessage{
-		Type:    eventType,
-		Service: "auth",
-		Channel: "auth",
-		UserID:  user.ID,
-		Data: fiber.Map{
-			"user_id":  user.ID,
-			"uuid":     user.UUID,
-			"username": user.Username,
-		},
+	go h.broker.Broadcast("gateway:broadcast", eventType, "auth", fiber.Map{
+		"user_id":  user.ID,
+		"uuid":     user.UUID,
+		"username": user.Username,
 	})
 }

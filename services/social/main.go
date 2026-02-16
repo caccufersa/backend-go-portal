@@ -4,15 +4,13 @@ import (
 	"database/sql"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"cacc/pkg/broker"
 	"cacc/pkg/database"
-	"cacc/pkg/hub"
-	"cacc/pkg/server"
 	"cacc/services/social/handlers"
-
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/limiter"
 )
 
 func main() {
@@ -25,60 +23,24 @@ func main() {
 
 	setupDatabase(db)
 
-	// --- Conecta ao hub central (auth) via WebSocket ---
-	hubURL := os.Getenv("AUTH_HUB_URL")
-	if hubURL == "" {
-		hubURL = "ws://localhost:8082/ws/hub"
-	}
+	b := broker.New()
+	defer b.Close()
 
-	hubClient := hub.NewClient(hubURL, "social", []string{"*"})
-	go hubClient.Connect()
-	defer hubClient.Close()
+	h := handlers.New(db, b)
+	h.RegisterActions()
 
-	h := handlers.New(db)
+	b.Subscribe("service:social")
 
-	// Broadcast via hub central
-	h.OnBroadcast = func(msgType string, data interface{}) {
-		hubClient.Broadcast(msgType, "social", data)
-	}
+	log.Println("Social worker listening on service:social")
 
-	app := server.NewApp("social")
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
 
-	app.Use(limiter.New(limiter.Config{
-		Max:        100,
-		Expiration: 1 * time.Minute,
-	}))
-
-	api := app.Group("/api")
-	api.Get("/posts", h.ListarFeed)
-	api.Post("/posts", h.CriarPost)
-	api.Get("/posts/:id", h.BuscarThread)
-	api.Post("/posts/:id/comment", h.Comentar)
-	api.Post("/posts/:id/like", h.Curtir)
-	api.Delete("/posts/:id/like", h.Descurtir)
-	api.Get("/users/:username", h.BuscarPerfil)
-
-	// Endpoint de fallback HTTP para broadcast (mantém compatibilidade)
-	app.Post("/internal/broadcast", func(c *fiber.Ctx) error {
-		var msg hub.WSMessage
-		if err := c.BodyParser(&msg); err != nil {
-			return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
-		}
-		hubClient.Send(msg)
-		return c.JSON(fiber.Map{"status": "ok"})
-	})
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
-	}
-
-	log.Println("Social rodando na porta " + port)
-	log.Fatal(app.Listen(":" + port))
+	log.Println("Social worker shutting down")
 }
 
 func setupDatabase(db *sql.DB) {
-	// Criar tabela posts
 	if _, err := db.Exec(`
         CREATE TABLE IF NOT EXISTS posts (
             id SERIAL PRIMARY KEY,
@@ -92,20 +54,15 @@ func setupDatabase(db *sql.DB) {
 		log.Println("Aviso ao criar tabela posts:", err)
 	}
 
-	// Criar índices
 	indexQueries := []string{
 		`CREATE INDEX IF NOT EXISTS idx_posts_parent ON posts(parent_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_posts_likes ON posts(likes DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author)`,
-		`CREATE INDEX IF NOT EXISTS idx_posts_root ON posts(created_at DESC) WHERE parent_id IS NULL`,
 	}
-
-	for _, indexQuery := range indexQueries {
-		if _, err := db.Exec(indexQuery); err != nil {
+	for _, q := range indexQueries {
+		if _, err := db.Exec(q); err != nil {
 			log.Println("Aviso ao criar índice:", err)
 		}
 	}
-
-	log.Println("Schema social criado com sucesso")
 }
