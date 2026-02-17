@@ -73,10 +73,6 @@ func main() {
 		return c.JSON(fiber.Map{"clients": wsHub.ClientCount()})
 	})
 
-	api := app.Group("/api/noticias")
-	api.Post("/fetch-link-meta", handlers.FetchLinkMeta)
-	api.Post("/upload/image", handlers.UploadImage)
-
 	app.Get("/internal/user/:uuid", auth.GetUserByUUID)
 
 	app.Use("/ws", func(c *fiber.Ctx) error {
