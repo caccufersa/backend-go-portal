@@ -11,102 +11,97 @@ import (
 	"time"
 	"unicode"
 
-	"cacc/pkg/broker"
-	"cacc/services/auth/models"
+	"cacc/pkg/cache"
+	"cacc/pkg/hub"
+	"cacc/pkg/models"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
-type CachedUser struct {
+type cachedUser struct {
 	User      models.User
 	ExpiresAt time.Time
 }
 
-type UserCache struct {
+type userCache struct {
 	mu     sync.RWMutex
-	byID   map[int]*CachedUser
-	byUUID map[string]*CachedUser
+	byID   map[int]*cachedUser
+	byUUID map[string]*cachedUser
 }
 
-func NewCache() *UserCache {
-	c := &UserCache{
-		byID:   make(map[int]*CachedUser),
-		byUUID: make(map[string]*CachedUser),
-	}
-	go c.cleanup()
-	return c
-}
-
-func (c *UserCache) Get(id int) (models.User, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if item, ok := c.byID[id]; ok && time.Now().Before(item.ExpiresAt) {
-		return item.User, true
-	}
-	return models.User{}, false
-}
-
-func (c *UserCache) GetByUUID(uuid string) (models.User, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if item, ok := c.byUUID[uuid]; ok && time.Now().Before(item.ExpiresAt) {
-		return item.User, true
-	}
-	return models.User{}, false
-}
-
-func (c *UserCache) Set(user models.User) {
-	c.mu.Lock()
-	entry := &CachedUser{User: user, ExpiresAt: time.Now().Add(15 * time.Minute)}
-	c.byID[user.ID] = entry
-	if user.UUID != "" {
-		c.byUUID[user.UUID] = entry
-	}
-	c.mu.Unlock()
-}
-
-func (c *UserCache) Delete(id int) {
-	c.mu.Lock()
-	if item, ok := c.byID[id]; ok {
-		delete(c.byUUID, item.User.UUID)
-	}
-	delete(c.byID, id)
-	c.mu.Unlock()
-}
-
-func (c *UserCache) cleanup() {
-	for {
-		time.Sleep(10 * time.Minute)
-		c.mu.Lock()
-		now := time.Now()
-		for k, v := range c.byID {
-			if now.After(v.ExpiresAt) {
-				delete(c.byUUID, v.User.UUID)
-				delete(c.byID, k)
-			}
-		}
-		c.mu.Unlock()
-	}
-}
-
-type Handler struct {
-	DB        *sql.DB
-	broker    *broker.Broker
+type AuthHandler struct {
+	db        *sql.DB
+	hub       *hub.Hub
+	redis     *cache.Redis
 	jwtSecret string
-	cache     *UserCache
+	users     *userCache
 }
 
-func New(db *sql.DB, b *broker.Broker) *Handler {
+func NewAuth(db *sql.DB, h *hub.Hub, r *cache.Redis) *AuthHandler {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		secret = "dev-secret-key-change-in-production"
 	}
-	return &Handler{DB: db, broker: b, jwtSecret: secret, cache: NewCache()}
+	ah := &AuthHandler{
+		db:        db,
+		hub:       h,
+		redis:     r,
+		jwtSecret: secret,
+		users: &userCache{
+			byID:   make(map[int]*cachedUser),
+			byUUID: make(map[string]*cachedUser),
+		},
+	}
+	go ah.cleanupUsers()
+	return ah
 }
 
-func (h *Handler) Register(c *fiber.Ctx) error {
+func (ah *AuthHandler) getUser(id int) (models.User, bool) {
+	ah.users.mu.RLock()
+	defer ah.users.mu.RUnlock()
+	if item, ok := ah.users.byID[id]; ok && time.Now().Before(item.ExpiresAt) {
+		return item.User, true
+	}
+	return models.User{}, false
+}
+
+func (ah *AuthHandler) setUser(user models.User) {
+	ah.users.mu.Lock()
+	entry := &cachedUser{User: user, ExpiresAt: time.Now().Add(15 * time.Minute)}
+	ah.users.byID[user.ID] = entry
+	if user.UUID != "" {
+		ah.users.byUUID[user.UUID] = entry
+	}
+	ah.users.mu.Unlock()
+}
+
+func (ah *AuthHandler) deleteUser(id int) {
+	ah.users.mu.Lock()
+	if item, ok := ah.users.byID[id]; ok {
+		delete(ah.users.byUUID, item.User.UUID)
+	}
+	delete(ah.users.byID, id)
+	ah.users.mu.Unlock()
+}
+
+func (ah *AuthHandler) cleanupUsers() {
+	for {
+		time.Sleep(10 * time.Minute)
+		ah.users.mu.Lock()
+		now := time.Now()
+		for k, v := range ah.users.byID {
+			if now.After(v.ExpiresAt) {
+				delete(ah.users.byUUID, v.User.UUID)
+				delete(ah.users.byID, k)
+			}
+		}
+		ah.users.mu.Unlock()
+	}
+}
+
+func (ah *AuthHandler) Register(c *fiber.Ctx) error {
 	var req models.RegisterRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
@@ -128,7 +123,7 @@ func (h *Handler) Register(c *fiber.Ctx) error {
 	}
 
 	var user models.User
-	err = h.DB.QueryRow(
+	err = ah.db.QueryRow(
 		`INSERT INTO users (username, password) VALUES ($1, $2)
 		 RETURNING id, uuid, username, created_at`,
 		strings.ToLower(req.Username), string(hashed),
@@ -142,12 +137,14 @@ func (h *Handler) Register(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao criar conta"})
 	}
 
-	h.cache.Set(user)
-	h.broadcastAuthEvent("user_registered", user)
-	return h.createSessionAndRespond(c, user, 201)
+	ah.setUser(user)
+	go ah.hub.Broadcast("user_registered", "auth", fiber.Map{
+		"user_id": user.ID, "uuid": user.UUID, "username": user.Username,
+	})
+	return ah.createSessionAndRespond(c, user, 201)
 }
 
-func (h *Handler) Login(c *fiber.Ctx) error {
+func (ah *AuthHandler) Login(c *fiber.Ctx) error {
 	var req models.LoginRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
@@ -159,7 +156,7 @@ func (h *Handler) Login(c *fiber.Ctx) error {
 
 	var user models.User
 	var hashedPw string
-	err := h.DB.QueryRow(
+	err := ah.db.QueryRow(
 		`SELECT id, uuid, username, password, created_at FROM users WHERE username = $1`,
 		strings.ToLower(strings.TrimSpace(req.Username)),
 	).Scan(&user.ID, &user.UUID, &user.Username, &hashedPw, &user.CreatedAt)
@@ -176,12 +173,14 @@ func (h *Handler) Login(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"erro": "Username ou senha incorretos"})
 	}
 
-	h.cache.Set(user)
-	h.broadcastAuthEvent("user_login", user)
-	return h.createSessionAndRespond(c, user, 200)
+	ah.setUser(user)
+	go ah.hub.Broadcast("user_login", "auth", fiber.Map{
+		"user_id": user.ID, "uuid": user.UUID, "username": user.Username,
+	})
+	return ah.createSessionAndRespond(c, user, 200)
 }
 
-func (h *Handler) Refresh(c *fiber.Ctx) error {
+func (ah *AuthHandler) Refresh(c *fiber.Ctx) error {
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
 	}
@@ -195,7 +194,7 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 
 	var session models.Session
 	var user models.User
-	err := h.DB.QueryRow(
+	err := ah.db.QueryRow(
 		`SELECT s.id, s.user_id, s.expires_at, u.uuid, u.username, u.created_at
 		 FROM sessions s JOIN users u ON u.id = s.user_id
 		 WHERE s.refresh_token = $1`, req.RefreshToken,
@@ -210,7 +209,7 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 	}
 
 	if time.Now().After(session.ExpiresAt) {
-		h.DB.Exec(`DELETE FROM sessions WHERE id = $1`, session.ID)
+		ah.db.Exec(`DELETE FROM sessions WHERE id = $1`, session.ID)
 		return c.Status(401).JSON(fiber.Map{"erro": "Sessão expirada, faça login novamente"})
 	}
 
@@ -218,7 +217,7 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 
 	newRefresh := generateRefreshToken()
 	newExpiry := time.Now().Add(30 * 24 * time.Hour)
-	_, err = h.DB.Exec(
+	_, err = ah.db.Exec(
 		`UPDATE sessions SET refresh_token = $1, expires_at = $2 WHERE id = $3`,
 		newRefresh, newExpiry, session.ID,
 	)
@@ -227,9 +226,9 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"erro": "Erro interno"})
 	}
 
-	accessToken := h.generateAccessToken(user)
-	h.setRefreshCookie(c, newRefresh, newExpiry)
-	h.cache.Set(user)
+	accessToken := ah.generateAccessToken(user)
+	ah.setRefreshCookie(c, newRefresh, newExpiry)
+	ah.setUser(user)
 
 	return c.JSON(models.AuthResponse{
 		AccessToken:  accessToken,
@@ -239,13 +238,13 @@ func (h *Handler) Refresh(c *fiber.Ctx) error {
 	})
 }
 
-func (h *Handler) Session(c *fiber.Ctx) error {
+func (ah *AuthHandler) Session(c *fiber.Ctx) error {
 	auth := c.Get("Authorization")
 	if auth != "" {
 		parts := strings.Split(auth, " ")
 		if len(parts) == 2 && parts[0] == "Bearer" {
 			token, err := jwt.ParseWithClaims(parts[1], &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
-				return []byte(h.jwtSecret), nil
+				return []byte(ah.jwtSecret), nil
 			})
 			if err == nil && token.Valid {
 				claims := token.Claims.(*jwt.MapClaims)
@@ -253,16 +252,14 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 				userUUID, _ := (*claims)["uuid"].(string)
 				username := (*claims)["username"].(string)
 
-				if user, ok := h.cache.Get(userID); ok {
+				if user, ok := ah.getUser(userID); ok {
 					return c.JSON(fiber.Map{"authenticated": true, "user": user})
 				}
 
 				return c.JSON(fiber.Map{
 					"authenticated": true,
 					"user": fiber.Map{
-						"id":       userID,
-						"uuid":     userUUID,
-						"username": username,
+						"id": userID, "uuid": userUUID, "username": username,
 					},
 				})
 			}
@@ -276,7 +273,7 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 
 	var session models.Session
 	var user models.User
-	err := h.DB.QueryRow(
+	err := ah.db.QueryRow(
 		`SELECT s.id, s.user_id, s.expires_at, u.uuid, u.username, u.created_at
 		 FROM sessions s JOIN users u ON u.id = s.user_id
 		 WHERE s.refresh_token = $1`, refreshToken,
@@ -284,9 +281,9 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 
 	if err != nil || time.Now().After(session.ExpiresAt) {
 		if err == nil {
-			h.DB.Exec(`DELETE FROM sessions WHERE id = $1`, session.ID)
+			ah.db.Exec(`DELETE FROM sessions WHERE id = $1`, session.ID)
 		}
-		h.clearRefreshCookie(c)
+		ah.clearRefreshCookie(c)
 		return c.Status(401).JSON(fiber.Map{"authenticated": false, "erro": "Sessão expirada"})
 	}
 
@@ -294,12 +291,12 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 
 	newRefresh := generateRefreshToken()
 	newExpiry := time.Now().Add(30 * 24 * time.Hour)
-	h.DB.Exec(`UPDATE sessions SET refresh_token = $1, expires_at = $2 WHERE id = $3`,
+	ah.db.Exec(`UPDATE sessions SET refresh_token = $1, expires_at = $2 WHERE id = $3`,
 		newRefresh, newExpiry, session.ID)
 
-	accessToken := h.generateAccessToken(user)
-	h.setRefreshCookie(c, newRefresh, newExpiry)
-	h.cache.Set(user)
+	accessToken := ah.generateAccessToken(user)
+	ah.setRefreshCookie(c, newRefresh, newExpiry)
+	ah.setUser(user)
 
 	return c.JSON(fiber.Map{
 		"authenticated": true,
@@ -309,15 +306,15 @@ func (h *Handler) Session(c *fiber.Ctx) error {
 	})
 }
 
-func (h *Handler) Me(c *fiber.Ctx) error {
+func (ah *AuthHandler) Me(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(int)
 
-	if user, ok := h.cache.Get(userID); ok {
+	if user, ok := ah.getUser(userID); ok {
 		return c.JSON(fiber.Map{"user": user})
 	}
 
 	var user models.User
-	err := h.DB.QueryRow(
+	err := ah.db.QueryRow(
 		`SELECT id, uuid, username, created_at FROM users WHERE id = $1`, userID,
 	).Scan(&user.ID, &user.UUID, &user.Username, &user.CreatedAt)
 
@@ -325,14 +322,14 @@ func (h *Handler) Me(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"erro": "Usuário não encontrado"})
 	}
 
-	h.cache.Set(user)
+	ah.setUser(user)
 	return c.JSON(fiber.Map{"user": user})
 }
 
-func (h *Handler) Logout(c *fiber.Ctx) error {
+func (ah *AuthHandler) Logout(c *fiber.Ctx) error {
 	refreshToken := c.Cookies("refresh_token")
 	if refreshToken != "" {
-		h.DB.Exec(`DELETE FROM sessions WHERE refresh_token = $1`, refreshToken)
+		ah.db.Exec(`DELETE FROM sessions WHERE refresh_token = $1`, refreshToken)
 	}
 
 	var req struct {
@@ -340,36 +337,33 @@ func (h *Handler) Logout(c *fiber.Ctx) error {
 	}
 	_ = c.BodyParser(&req)
 	if req.RefreshToken != "" {
-		h.DB.Exec(`DELETE FROM sessions WHERE refresh_token = $1`, req.RefreshToken)
+		ah.db.Exec(`DELETE FROM sessions WHERE refresh_token = $1`, req.RefreshToken)
 	}
 
-	userID, ok := c.Locals("user_id").(int)
-	if ok {
-		h.cache.Delete(userID)
-	}
-
-	h.clearRefreshCookie(c)
-
-	if uid, ok2 := c.Locals("user_id").(int); ok2 {
+	if userID, ok := c.Locals("user_id").(int); ok {
+		ah.deleteUser(userID)
 		userUUID, _ := c.Locals("user_uuid").(string)
-		h.broadcastAuthEvent("user_logout", models.User{ID: uid, UUID: userUUID})
+		go ah.hub.Broadcast("user_logout", "auth", fiber.Map{
+			"user_id": userID, "uuid": userUUID,
+		})
 	}
 
+	ah.clearRefreshCookie(c)
 	return c.JSON(fiber.Map{"status": "ok"})
 }
 
-func (h *Handler) LogoutAll(c *fiber.Ctx) error {
+func (ah *AuthHandler) LogoutAll(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(int)
-	h.DB.Exec(`DELETE FROM sessions WHERE user_id = $1`, userID)
-	h.cache.Delete(userID)
-	h.clearRefreshCookie(c)
+	ah.db.Exec(`DELETE FROM sessions WHERE user_id = $1`, userID)
+	ah.deleteUser(userID)
+	ah.clearRefreshCookie(c)
 	return c.JSON(fiber.Map{"status": "ok", "message": "Todas as sessões encerradas"})
 }
 
-func (h *Handler) Sessions(c *fiber.Ctx) error {
+func (ah *AuthHandler) Sessions(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(int)
 
-	rows, err := h.DB.Query(
+	rows, err := ah.db.Query(
 		`SELECT id, user_agent, ip, expires_at, created_at FROM sessions
 		 WHERE user_id = $1 AND expires_at > NOW() ORDER BY created_at DESC`, userID,
 	)
@@ -383,23 +377,45 @@ func (h *Handler) Sessions(c *fiber.Ctx) error {
 		var s models.Session
 		rows.Scan(&s.ID, &s.UserAgent, &s.IP, &s.ExpiresAt, &s.CreatedAt)
 		sessions = append(sessions, fiber.Map{
-			"id":         s.ID,
-			"user_agent": s.UserAgent,
-			"ip":         s.IP,
-			"expires_at": s.ExpiresAt,
-			"created_at": s.CreatedAt,
+			"id": s.ID, "user_agent": s.UserAgent, "ip": s.IP,
+			"expires_at": s.ExpiresAt, "created_at": s.CreatedAt,
 		})
 	}
 
 	return c.JSON(fiber.Map{"sessions": sessions})
 }
 
-func (h *Handler) createSessionAndRespond(c *fiber.Ctx, user models.User, status int) error {
-	accessToken := h.generateAccessToken(user)
+func (ah *AuthHandler) GetUserByUUID(c *fiber.Ctx) error {
+	uuid := c.Params("uuid")
+
+	ah.users.mu.RLock()
+	if item, ok := ah.users.byUUID[uuid]; ok && time.Now().Before(item.ExpiresAt) {
+		ah.users.mu.RUnlock()
+		return c.JSON(fiber.Map{
+			"id": item.User.ID, "uuid": item.User.UUID,
+			"username": item.User.Username, "created_at": item.User.CreatedAt,
+		})
+	}
+	ah.users.mu.RUnlock()
+
+	var id int
+	var username string
+	var createdAt time.Time
+	err := ah.db.QueryRow(
+		`SELECT id, username, created_at FROM users WHERE uuid = $1`, uuid,
+	).Scan(&id, &username, &createdAt)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"erro": "Usuário não encontrado"})
+	}
+	return c.JSON(fiber.Map{"id": id, "uuid": uuid, "username": username, "created_at": createdAt})
+}
+
+func (ah *AuthHandler) createSessionAndRespond(c *fiber.Ctx, user models.User, status int) error {
+	accessToken := ah.generateAccessToken(user)
 	refreshToken := generateRefreshToken()
 	expiresAt := time.Now().Add(30 * 24 * time.Hour)
 
-	_, err := h.DB.Exec(
+	_, err := ah.db.Exec(
 		`INSERT INTO sessions (user_id, refresh_token, user_agent, ip, expires_at)
 		 VALUES ($1, $2, $3, $4, $5)`,
 		user.ID, refreshToken, c.Get("User-Agent"), c.IP(), expiresAt,
@@ -409,7 +425,7 @@ func (h *Handler) createSessionAndRespond(c *fiber.Ctx, user models.User, status
 		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao criar sessão"})
 	}
 
-	h.setRefreshCookie(c, refreshToken, expiresAt)
+	ah.setRefreshCookie(c, refreshToken, expiresAt)
 
 	return c.Status(status).JSON(models.AuthResponse{
 		AccessToken:  accessToken,
@@ -419,7 +435,7 @@ func (h *Handler) createSessionAndRespond(c *fiber.Ctx, user models.User, status
 	})
 }
 
-func (h *Handler) generateAccessToken(user models.User) string {
+func (ah *AuthHandler) generateAccessToken(user models.User) string {
 	claims := jwt.MapClaims{
 		"user_id":    user.ID,
 		"uuid":       user.UUID,
@@ -429,7 +445,7 @@ func (h *Handler) generateAccessToken(user models.User) string {
 		"token_type": "access",
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	s, _ := token.SignedString([]byte(h.jwtSecret))
+	s, _ := token.SignedString([]byte(ah.jwtSecret))
 	return s
 }
 
@@ -439,31 +455,22 @@ func generateRefreshToken() string {
 	return hex.EncodeToString(b)
 }
 
-func (h *Handler) setRefreshCookie(c *fiber.Ctx, token string, expires time.Time) {
+func (ah *AuthHandler) setRefreshCookie(c *fiber.Ctx, token string, expires time.Time) {
 	secure := os.Getenv("GO_ENV") == "production"
 	sameSite := "Lax"
 	if secure {
 		sameSite = "None"
 	}
-
 	c.Cookie(&fiber.Cookie{
-		Name:     "refresh_token",
-		Value:    token,
-		Expires:  expires,
-		HTTPOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Path:     "/auth",
+		Name: "refresh_token", Value: token, Expires: expires,
+		HTTPOnly: true, Secure: secure, SameSite: sameSite, Path: "/auth",
 	})
 }
 
-func (h *Handler) clearRefreshCookie(c *fiber.Ctx) {
+func (ah *AuthHandler) clearRefreshCookie(c *fiber.Ctx) {
 	c.Cookie(&fiber.Cookie{
-		Name:     "refresh_token",
-		Value:    "",
-		Expires:  time.Now().Add(-1 * time.Hour),
-		HTTPOnly: true,
-		Path:     "/auth",
+		Name: "refresh_token", Value: "", Expires: time.Now().Add(-1 * time.Hour),
+		HTTPOnly: true, Path: "/auth",
 	})
 }
 
@@ -490,15 +497,4 @@ func validatePassword(p string) error {
 		return fiber.NewError(400, "Senha muito longa")
 	}
 	return nil
-}
-
-func (h *Handler) broadcastAuthEvent(eventType string, user models.User) {
-	if h.broker == nil {
-		return
-	}
-	go h.broker.Broadcast("gateway:broadcast", eventType, "auth", fiber.Map{
-		"user_id":  user.ID,
-		"uuid":     user.UUID,
-		"username": user.Username,
-	})
 }

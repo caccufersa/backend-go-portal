@@ -2,15 +2,15 @@ package hub
 
 import (
 	"encoding/json"
-	"log"
 	"sync"
 	"time"
 
-	"cacc/pkg/broker"
 	"cacc/pkg/envelope"
 
 	"github.com/gofiber/contrib/websocket"
 )
+
+type ActionHandler func(envelope.Envelope)
 
 type clientConn struct {
 	conn     *websocket.Conn
@@ -27,26 +27,22 @@ func (cc *clientConn) send(data []byte) {
 }
 
 type Hub struct {
-	mu      sync.RWMutex
-	clients map[*websocket.Conn]*clientConn
-	byUser  map[int][]*clientConn
-	broker  *broker.Broker
+	mu       sync.RWMutex
+	clients  map[*websocket.Conn]*clientConn
+	byUser   map[int][]*clientConn
+	handlers map[string]ActionHandler
 }
 
-func New(b *broker.Broker) *Hub {
-	h := &Hub{
-		clients: make(map[*websocket.Conn]*clientConn),
-		byUser:  make(map[int][]*clientConn),
-		broker:  b,
+func New() *Hub {
+	return &Hub{
+		clients:  make(map[*websocket.Conn]*clientConn),
+		byUser:   make(map[int][]*clientConn),
+		handlers: make(map[string]ActionHandler),
 	}
+}
 
-	b.Subscribe("gateway:replies", "gateway:broadcast")
-
-	b.On("", func(env envelope.Envelope) {
-		h.deliverToClient(env)
-	})
-
-	return h
+func (h *Hub) On(action string, fn ActionHandler) {
+	h.handlers[action] = fn
 }
 
 func (h *Hub) HandleClientConn(c *websocket.Conn, userID int, uuid, username string) {
@@ -58,8 +54,6 @@ func (h *Hub) HandleClientConn(c *websocket.Conn, userID int, uuid, username str
 		h.byUser[userID] = append(h.byUser[userID], cc)
 	}
 	h.mu.Unlock()
-
-	log.Printf("[gateway] client connected user_id=%d uuid=%s", userID, uuid)
 
 	defer func() {
 		h.mu.Lock()
@@ -78,7 +72,6 @@ func (h *Hub) HandleClientConn(c *websocket.Conn, userID int, uuid, username str
 		}
 		h.mu.Unlock()
 		c.Close()
-		log.Printf("[gateway] client disconnected user_id=%d", userID)
 	}()
 
 	for {
@@ -111,25 +104,49 @@ func (h *Hub) HandleClientConn(c *websocket.Conn, userID int, uuid, username str
 		env.Username = username
 		env.ReplyTo = env.ID
 
-		service := env.Service
-		if service == "" {
-			errEnv := envelope.NewError(env, 400, "campo 'service' obrigatório")
+		handler, ok := h.handlers[env.Action]
+		if !ok {
+			errEnv := envelope.NewError(env, 404, "ação não encontrada: "+env.Action)
 			data, _ := errEnv.Marshal()
 			cc.send(data)
 			continue
 		}
 
-		channel := "service:" + service
-		if err := h.broker.Publish(channel, env); err != nil {
-			errEnv := envelope.NewError(env, 502, "serviço indisponível")
-			data, _ := errEnv.Marshal()
-			cc.send(data)
-		}
+		go handler(env)
 	}
 }
 
-func (h *Hub) deliverToClient(env envelope.Envelope) {
-	data, err := env.Marshal()
+func (h *Hub) Reply(original envelope.Envelope, data interface{}) {
+	env, err := envelope.NewReply(original, data)
+	if err != nil {
+		return
+	}
+	h.deliverToUser(env)
+}
+
+func (h *Hub) ReplyError(original envelope.Envelope, code int, msg string) {
+	env := envelope.NewError(original, code, msg)
+	h.deliverToUser(env)
+}
+
+func (h *Hub) Broadcast(action, service string, data interface{}) {
+	env, err := envelope.NewEvent(action, service, data)
+	if err != nil {
+		return
+	}
+	raw, err := env.Marshal()
+	if err != nil {
+		return
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, cc := range h.clients {
+		cc.send(raw)
+	}
+}
+
+func (h *Hub) deliverToUser(env envelope.Envelope) {
+	raw, err := env.Marshal()
 	if err != nil {
 		return
 	}
@@ -139,7 +156,7 @@ func (h *Hub) deliverToClient(env envelope.Envelope) {
 		conns := h.byUser[env.UserID]
 		h.mu.RUnlock()
 		for _, cc := range conns {
-			cc.send(data)
+			cc.send(raw)
 		}
 		return
 	}
@@ -147,19 +164,7 @@ func (h *Hub) deliverToClient(env envelope.Envelope) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for _, cc := range h.clients {
-		cc.send(data)
-	}
-}
-
-func (h *Hub) BroadcastToAll(env envelope.Envelope) {
-	data, err := env.Marshal()
-	if err != nil {
-		return
-	}
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for _, cc := range h.clients {
-		cc.send(data)
+		cc.send(raw)
 	}
 }
 

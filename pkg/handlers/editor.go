@@ -60,9 +60,7 @@ func FetchLinkMeta(c *fiber.Ctx) error {
 	return c.JSON(LinkMetadata{
 		Success: 1,
 		Meta: Meta{
-			Title:       title,
-			Description: description,
-			Image:       Image{URL: imageURL},
+			Title: title, Description: description, Image: Image{URL: imageURL},
 		},
 	})
 }

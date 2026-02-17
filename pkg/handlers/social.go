@@ -2,33 +2,35 @@ package handlers
 
 import (
 	"database/sql"
-	"log"
+	"fmt"
 
-	"cacc/pkg/broker"
+	"cacc/pkg/cache"
 	"cacc/pkg/envelope"
-	"cacc/services/social/models"
+	"cacc/pkg/hub"
+	"cacc/pkg/models"
 )
 
-type Handler struct {
-	db     *sql.DB
-	broker *broker.Broker
+type SocialHandler struct {
+	db    *sql.DB
+	hub   *hub.Hub
+	redis *cache.Redis
 }
 
-func New(db *sql.DB, b *broker.Broker) *Handler {
-	return &Handler{db: db, broker: b}
+func NewSocial(db *sql.DB, h *hub.Hub, r *cache.Redis) *SocialHandler {
+	return &SocialHandler{db: db, hub: h, redis: r}
 }
 
-func (h *Handler) RegisterActions() {
-	h.broker.On("social.feed", h.listarFeed)
-	h.broker.On("social.thread", h.buscarThread)
-	h.broker.On("social.profile", h.buscarPerfil)
-	h.broker.On("social.post.create", h.criarPost)
-	h.broker.On("social.post.comment", h.comentar)
-	h.broker.On("social.post.like", h.curtir)
-	h.broker.On("social.post.unlike", h.descurtir)
+func (s *SocialHandler) RegisterActions() {
+	s.hub.On("social.feed", s.listarFeed)
+	s.hub.On("social.thread", s.buscarThread)
+	s.hub.On("social.profile", s.buscarPerfil)
+	s.hub.On("social.post.create", s.criarPost)
+	s.hub.On("social.post.comment", s.comentar)
+	s.hub.On("social.post.like", s.curtir)
+	s.hub.On("social.post.unlike", s.descurtir)
 }
 
-func (h *Handler) listarFeed(env envelope.Envelope) {
+func (s *SocialHandler) listarFeed(env envelope.Envelope) {
 	type feedReq struct {
 		Limit int `json:"limit"`
 	}
@@ -38,14 +40,20 @@ func (h *Handler) listarFeed(env envelope.Envelope) {
 		limit = 50
 	}
 
-	rows, err := h.db.Query(
+	cacheKey := fmt.Sprintf("feed:%d", limit)
+	var cached []models.Post
+	if s.redis.Get(cacheKey, &cached) {
+		s.hub.Reply(env, cached)
+		return
+	}
+
+	rows, err := s.db.Query(
 		`SELECT id, texto, author, likes, created_at
 		 FROM posts WHERE parent_id IS NULL
 		 ORDER BY created_at DESC LIMIT $1`, limit,
 	)
 	if err != nil {
-		log.Println("Erro query feed:", err)
-		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao buscar feed")
+		s.hub.ReplyError(env, 500, "Erro ao buscar feed")
 		return
 	}
 	defer rows.Close()
@@ -56,58 +64,67 @@ func (h *Handler) listarFeed(env envelope.Envelope) {
 		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.Likes, &p.CreatedAt); err != nil {
 			continue
 		}
-		p.Replies = h.carregarReplies(p.ID, 3)
+		p.Replies = s.carregarReplies(p.ID, 3)
 		posts = append(posts, p)
 	}
 
-	h.broker.Reply("gateway:replies", env, posts)
+	s.redis.Set(cacheKey, posts, 15e9)
+	s.hub.Reply(env, posts)
 }
 
-func (h *Handler) buscarThread(env envelope.Envelope) {
+func (s *SocialHandler) buscarThread(env envelope.Envelope) {
 	type threadReq struct {
 		ID int `json:"id"`
 	}
 	req, _ := envelope.ParseData[threadReq](env)
 	if req.ID <= 0 {
-		h.broker.ReplyError("gateway:replies", env, 400, "ID inválido")
+		s.hub.ReplyError(env, 400, "ID inválido")
+		return
+	}
+
+	cacheKey := fmt.Sprintf("thread:%d", req.ID)
+	var cached models.Post
+	if s.redis.Get(cacheKey, &cached) {
+		s.hub.Reply(env, cached)
 		return
 	}
 
 	var p models.Post
-	err := h.db.QueryRow(
+	err := s.db.QueryRow(
 		`SELECT id, texto, author, parent_id, likes, created_at FROM posts WHERE id = $1`, req.ID,
 	).Scan(&p.ID, &p.Texto, &p.Author, &p.ParentID, &p.Likes, &p.CreatedAt)
 
 	if err == sql.ErrNoRows {
-		h.broker.ReplyError("gateway:replies", env, 404, "Post não encontrado")
+		s.hub.ReplyError(env, 404, "Post não encontrado")
 		return
 	}
 	if err != nil {
-		h.broker.ReplyError("gateway:replies", env, 500, "Erro no banco")
+		s.hub.ReplyError(env, 500, "Erro no banco")
 		return
 	}
 
-	p.Replies = h.carregarReplies(p.ID, 10)
-	h.broker.Reply("gateway:replies", env, p)
+	p.Replies = s.carregarReplies(p.ID, 10)
+	s.redis.Set(cacheKey, p, 30e9)
+	s.hub.Reply(env, p)
 }
 
-func (h *Handler) buscarPerfil(env envelope.Envelope) {
+func (s *SocialHandler) buscarPerfil(env envelope.Envelope) {
 	type profileReq struct {
 		Username string `json:"username"`
 	}
 	req, _ := envelope.ParseData[profileReq](env)
 	if req.Username == "" {
-		h.broker.ReplyError("gateway:replies", env, 400, "Username obrigatório")
+		s.hub.ReplyError(env, 400, "Username obrigatório")
 		return
 	}
 
-	rows, err := h.db.Query(
+	rows, err := s.db.Query(
 		`SELECT id, texto, author, parent_id, likes, created_at
 		 FROM posts WHERE author = $1
 		 ORDER BY created_at DESC LIMIT 100`, req.Username,
 	)
 	if err != nil {
-		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao buscar perfil")
+		s.hub.ReplyError(env, 500, "Erro ao buscar perfil")
 		return
 	}
 	defer rows.Close()
@@ -120,19 +137,17 @@ func (h *Handler) buscarPerfil(env envelope.Envelope) {
 			continue
 		}
 		totalLikes += p.Likes
-		p.Replies = h.carregarReplies(p.ID, 2)
+		p.Replies = s.carregarReplies(p.ID, 2)
 		posts = append(posts, p)
 	}
 
-	h.broker.Reply("gateway:replies", env, map[string]interface{}{
-		"username":    req.Username,
-		"total_posts": len(posts),
-		"total_likes": totalLikes,
-		"posts":       posts,
+	s.hub.Reply(env, map[string]interface{}{
+		"username": req.Username, "total_posts": len(posts),
+		"total_likes": totalLikes, "posts": posts,
 	})
 }
 
-func (h *Handler) criarPost(env envelope.Envelope) {
+func (s *SocialHandler) criarPost(env envelope.Envelope) {
 	type createReq struct {
 		Texto  string `json:"texto"`
 		Author string `json:"author"`
@@ -148,15 +163,14 @@ func (h *Handler) criarPost(env envelope.Envelope) {
 	}
 
 	var p models.Post
-	err := h.db.QueryRow(
+	err := s.db.QueryRow(
 		`INSERT INTO posts (texto, author, parent_id, likes)
 		 VALUES ($1, $2, NULL, 0)
 		 RETURNING id, created_at`, req.Texto, author,
 	).Scan(&p.ID, &p.CreatedAt)
 
 	if err != nil {
-		log.Println("Erro insert post:", err)
-		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao criar post")
+		s.hub.ReplyError(env, 500, "Erro ao criar post")
 		return
 	}
 
@@ -165,11 +179,12 @@ func (h *Handler) criarPost(env envelope.Envelope) {
 	p.Likes = 0
 	p.Replies = []models.Post{}
 
-	h.broker.Reply("gateway:replies", env, p)
-	h.broker.Broadcast("gateway:broadcast", "new_post", "social", p)
+	s.redis.DelPattern("feed:*")
+	s.hub.Reply(env, p)
+	s.hub.Broadcast("new_post", "social", p)
 }
 
-func (h *Handler) comentar(env envelope.Envelope) {
+func (s *SocialHandler) comentar(env envelope.Envelope) {
 	type commentReq struct {
 		ParentID int    `json:"parent_id"`
 		Texto    string `json:"texto"`
@@ -178,7 +193,7 @@ func (h *Handler) comentar(env envelope.Envelope) {
 	req, _ := envelope.ParseData[commentReq](env)
 
 	if req.ParentID <= 0 {
-		h.broker.ReplyError("gateway:replies", env, 400, "parent_id inválido")
+		s.hub.ReplyError(env, 400, "parent_id inválido")
 		return
 	}
 
@@ -191,14 +206,14 @@ func (h *Handler) comentar(env envelope.Envelope) {
 	}
 
 	var reply models.Post
-	err := h.db.QueryRow(
+	err := s.db.QueryRow(
 		`INSERT INTO posts (texto, author, parent_id, likes)
 		 VALUES ($1, $2, $3, 0)
 		 RETURNING id, created_at`, req.Texto, author, req.ParentID,
 	).Scan(&reply.ID, &reply.CreatedAt)
 
 	if err != nil {
-		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao comentar")
+		s.hub.ReplyError(env, 500, "Erro ao comentar")
 		return
 	}
 
@@ -208,25 +223,27 @@ func (h *Handler) comentar(env envelope.Envelope) {
 	reply.Likes = 0
 	reply.Replies = []models.Post{}
 
-	h.broker.Reply("gateway:replies", env, reply)
-	h.broker.Broadcast("gateway:broadcast", "new_comment", "social", reply)
+	s.redis.Del(fmt.Sprintf("thread:%d", req.ParentID))
+	s.redis.DelPattern("feed:*")
+	s.hub.Reply(env, reply)
+	s.hub.Broadcast("new_comment", "social", reply)
 }
 
-func (h *Handler) curtir(env envelope.Envelope) {
-	h.toggleLike(env, 1)
+func (s *SocialHandler) curtir(env envelope.Envelope) {
+	s.toggleLike(env, 1)
 }
 
-func (h *Handler) descurtir(env envelope.Envelope) {
-	h.toggleLike(env, -1)
+func (s *SocialHandler) descurtir(env envelope.Envelope) {
+	s.toggleLike(env, -1)
 }
 
-func (h *Handler) toggleLike(env envelope.Envelope, delta int) {
+func (s *SocialHandler) toggleLike(env envelope.Envelope, delta int) {
 	type likeReq struct {
 		ID int `json:"id"`
 	}
 	req, _ := envelope.ParseData[likeReq](env)
 	if req.ID <= 0 {
-		h.broker.ReplyError("gateway:replies", env, 400, "ID inválido")
+		s.hub.ReplyError(env, 400, "ID inválido")
 		return
 	}
 
@@ -237,32 +254,34 @@ func (h *Handler) toggleLike(env envelope.Envelope, delta int) {
 		query = `UPDATE posts SET likes = GREATEST(likes - 1, 0) WHERE id = $1`
 	}
 
-	result, err := h.db.Exec(query, req.ID)
+	result, err := s.db.Exec(query, req.ID)
 	if err != nil {
-		h.broker.ReplyError("gateway:replies", env, 500, "Erro ao atualizar like")
+		s.hub.ReplyError(env, 500, "Erro ao atualizar like")
 		return
 	}
 
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		h.broker.ReplyError("gateway:replies", env, 404, "Post não encontrado")
+	rowsAff, _ := result.RowsAffected()
+	if rowsAff == 0 {
+		s.hub.ReplyError(env, 404, "Post não encontrado")
 		return
 	}
 
 	var newLikes int
-	h.db.QueryRow(`SELECT likes FROM posts WHERE id = $1`, req.ID).Scan(&newLikes)
+	s.db.QueryRow(`SELECT likes FROM posts WHERE id = $1`, req.ID).Scan(&newLikes)
 
 	payload := map[string]interface{}{"post_id": req.ID, "likes": newLikes}
-	h.broker.Reply("gateway:replies", env, payload)
-	h.broker.Broadcast("gateway:broadcast", "like_updated", "social", payload)
+	s.redis.Del(fmt.Sprintf("thread:%d", req.ID))
+	s.redis.DelPattern("feed:*")
+	s.hub.Reply(env, payload)
+	s.hub.Broadcast("like_updated", "social", payload)
 }
 
-func (h *Handler) carregarReplies(parentID int, maxDepth int) []models.Post {
+func (s *SocialHandler) carregarReplies(parentID int, maxDepth int) []models.Post {
 	if maxDepth <= 0 {
 		return nil
 	}
 
-	rows, err := h.db.Query(
+	rows, err := s.db.Query(
 		`SELECT id, texto, author, likes, created_at
 		 FROM posts WHERE parent_id = $1
 		 ORDER BY created_at ASC LIMIT 20`, parentID,
@@ -280,7 +299,7 @@ func (h *Handler) carregarReplies(parentID int, maxDepth int) []models.Post {
 		}
 		pid := parentID
 		r.ParentID = &pid
-		r.Replies = h.carregarReplies(r.ID, maxDepth-1)
+		r.Replies = s.carregarReplies(r.ID, maxDepth-1)
 		replies = append(replies, r)
 	}
 
