@@ -51,13 +51,19 @@ func main() {
 
 	authGroup := app.Group("/auth")
 	authGroup.Post("/register", limiter.New(limiter.Config{
-		Max: 10, Expiration: 1 * time.Minute,
-		KeyGenerator: func(c *fiber.Ctx) string { return c.IP() },
+		Max:        5,
+		Expiration: 1 * time.Minute,
+		KeyGenerator: func(c *fiber.Ctx) string {
+			return c.IP()
+		},
 	}), auth.Register)
 
 	authGroup.Post("/login", limiter.New(limiter.Config{
-		Max: 20, Expiration: 1 * time.Minute,
-		KeyGenerator: func(c *fiber.Ctx) string { return c.IP() },
+		Max:        10,
+		Expiration: 1 * time.Minute,
+		KeyGenerator: func(c *fiber.Ctx) string {
+			return c.IP()
+		},
 	}), auth.Login)
 
 	authGroup.Post("/refresh", auth.Refresh)
@@ -75,47 +81,7 @@ func main() {
 
 	app.Get("/internal/user/:uuid", auth.GetUserByUUID)
 
-	app.Use("/ws", func(c *fiber.Ctx) error {
-		if !websocket.IsWebSocketUpgrade(c) {
-			return fiber.ErrUpgradeRequired
-		}
-
-		tokenStr := c.Query("token")
-		if tokenStr == "" {
-			authHeader := c.Get("Authorization")
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				tokenStr = authHeader[7:]
-			}
-		}
-
-		userID := 0
-		userUUID := ""
-		username := ""
-		if tokenStr != "" {
-			secret := os.Getenv("JWT_SECRET")
-			if secret == "" {
-				secret = "dev-secret-key-change-in-production"
-			}
-			token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
-				return []byte(secret), nil
-			})
-			if err == nil && token.Valid {
-				claims := token.Claims.(*jwt.MapClaims)
-				userID = int((*claims)["user_id"].(float64))
-				if uid, ok := (*claims)["uuid"].(string); ok {
-					userUUID = uid
-				}
-				if uname, ok := (*claims)["username"].(string); ok {
-					username = uname
-				}
-			}
-		}
-
-		c.Locals("user_id", userID)
-		c.Locals("user_uuid", userUUID)
-		c.Locals("username", username)
-		return c.Next()
-	})
+	app.Use("/ws", parseWSToken)
 
 	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
 		userID, _ := c.Locals("user_id").(int)
@@ -130,6 +96,7 @@ func main() {
 	}
 
 	addr := "0.0.0.0:" + port
+	log.Printf("[PORTAL] WebSocket: wss://<domain>/ws")
 	log.Printf("[PORTAL] Server starting on %s", addr)
 
 	if err := app.Listen(addr); err != nil {
@@ -137,10 +104,55 @@ func main() {
 	}
 }
 
-func setupDatabase(db *sql.DB) {
-	if _, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`); err != nil {
-		log.Println("Aviso pgcrypto:", err)
+func parseWSToken(c *fiber.Ctx) error {
+	if !websocket.IsWebSocketUpgrade(c) {
+		return fiber.ErrUpgradeRequired
 	}
+
+	tokenStr := c.Query("token")
+	if tokenStr == "" {
+		authHeader := c.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenStr = authHeader[7:]
+		}
+	}
+
+	userID := 0
+	userUUID := ""
+	username := ""
+
+	if tokenStr != "" {
+		secret := os.Getenv("JWT_SECRET")
+		if secret == "" {
+			secret = "dev-secret-key-change-in-production"
+		}
+
+		token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
+			return []byte(secret), nil
+		})
+
+		if err == nil && token.Valid {
+			claims := token.Claims.(*jwt.MapClaims)
+			if id, ok := (*claims)["user_id"].(float64); ok {
+				userID = int(id)
+			}
+			if uid, ok := (*claims)["uuid"].(string); ok {
+				userUUID = uid
+			}
+			if uname, ok := (*claims)["username"].(string); ok {
+				username = uname
+			}
+		}
+	}
+
+	c.Locals("user_id", userID)
+	c.Locals("user_uuid", userUUID)
+	c.Locals("username", username)
+	return c.Next()
+}
+
+func setupDatabase(db *sql.DB) {
+	db.Exec(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`)
 
 	schemas := []string{
 		`CREATE TABLE IF NOT EXISTS users (
@@ -189,9 +201,7 @@ func setupDatabase(db *sql.DB) {
 	}
 
 	for _, s := range schemas {
-		if _, err := db.Exec(s); err != nil {
-			log.Fatal("Erro schema:", err)
-		}
+		db.Exec(s)
 	}
 
 	alterations := []string{
@@ -226,12 +236,14 @@ func setupDatabase(db *sql.DB) {
 		db.Exec(idx)
 	}
 
-	log.Println("Schema initialized")
+	log.Println("[DB] Schema initialized")
 }
 
 func cleanExpiredSessions(db *sql.DB) {
-	for {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
 		db.Exec(`DELETE FROM sessions WHERE expires_at < NOW()`)
-		time.Sleep(1 * time.Hour)
 	}
 }
