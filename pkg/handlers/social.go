@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"fmt"
+	"log"
 
 	"cacc/pkg/cache"
 	"cacc/pkg/envelope"
@@ -64,7 +65,11 @@ func (s *SocialHandler) listarFeed(env envelope.Envelope) {
 		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.Likes, &p.CreatedAt); err != nil {
 			continue
 		}
-		p.Replies = s.carregarReplies(p.ID, 3)
+		replies := s.carregarReplies(p.ID, 3)
+		if replies == nil {
+			replies = []models.Post{}
+		}
+		p.Replies = replies
 		posts = append(posts, p)
 	}
 
@@ -137,7 +142,11 @@ func (s *SocialHandler) buscarPerfil(env envelope.Envelope) {
 			continue
 		}
 		totalLikes += p.Likes
-		p.Replies = s.carregarReplies(p.ID, 2)
+		replies := s.carregarReplies(p.ID, 2)
+		if replies == nil {
+			replies = []models.Post{}
+		}
+		p.Replies = replies
 		posts = append(posts, p)
 	}
 
@@ -180,6 +189,7 @@ func (s *SocialHandler) criarPost(env envelope.Envelope) {
 	p.Replies = []models.Post{}
 
 	s.redis.DelPattern("feed:*")
+	log.Printf("[SOCIAL] Post criado: id=%d author=%s", p.ID, p.Author)
 	s.hub.Reply(env, p)
 	s.hub.Broadcast("new_post", "social", p)
 }
@@ -225,6 +235,7 @@ func (s *SocialHandler) comentar(env envelope.Envelope) {
 
 	s.redis.Del(fmt.Sprintf("thread:%d", req.ParentID))
 	s.redis.DelPattern("feed:*")
+	log.Printf("[SOCIAL] Comentário criado: id=%d parent=%d author=%s", reply.ID, req.ParentID, reply.Author)
 	s.hub.Reply(env, reply)
 	s.hub.Broadcast("new_comment", "social", reply)
 }

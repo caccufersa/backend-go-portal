@@ -8,6 +8,6 @@ type Post struct {
 	Author    string    `json:"author"`
 	ParentID  *int      `json:"parent_id,omitempty"`
 	Likes     int       `json:"likes"`
-	CreatedAt time.Time `json:"data_criacao"`
+	CreatedAt time.Time `json:"created_at"`
 	Replies   []Post    `json:"replies,omitempty"`
 }
