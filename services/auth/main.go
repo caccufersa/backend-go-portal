@@ -31,10 +31,14 @@ func main() {
 	setupDatabase(db)
 	cleanExpiredSessions(db)
 
+	log.Println("[AUTH GATEWAY] Connecting to Redis broker...")
 	b := broker.New()
 	defer b.Close()
+	log.Println("[AUTH GATEWAY] Redis broker connected")
 
+	log.Println("[AUTH GATEWAY] Initializing WebSocket Hub...")
 	wsHub := hub.New(b)
+	log.Println("[AUTH GATEWAY] WebSocket Hub ready")
 
 	h := handlers.New(db, b)
 
@@ -138,8 +142,15 @@ func main() {
 		port = "8082"
 	}
 
-	log.Println("Auth Gateway rodando na porta " + port)
-	log.Fatal(app.Listen(":" + port))
+	addr := "0.0.0.0:" + port
+	log.Printf("[AUTH GATEWAY] Initialized successfully")
+	log.Printf("[AUTH GATEWAY] WebSocket endpoint: ws://%s/ws", addr)
+	log.Printf("[AUTH GATEWAY] Health check: http://%s/health", addr)
+	log.Printf("[AUTH GATEWAY] Starting server on %s", addr)
+
+	if err := app.Listen(addr); err != nil {
+		log.Fatalf("[AUTH GATEWAY] Failed to start: %v", err)
+	}
 }
 
 func setupDatabase(db *sql.DB) {

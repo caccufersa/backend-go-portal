@@ -23,15 +23,18 @@ func main() {
 
 	setupDatabase(db)
 
+	log.Println("[SOCIAL WORKER] Connecting to Redis broker...")
 	b := broker.New()
 	defer b.Close()
+	log.Println("[SOCIAL WORKER] Redis broker connected")
 
 	h := handlers.New(db, b)
 	h.RegisterActions()
 
 	b.Subscribe("service:social")
 
-	log.Println("Social worker listening on service:social")
+	log.Println("[SOCIAL WORKER] Listening on channel: service:social")
+	log.Println("[SOCIAL WORKER] Ready to process requests")
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

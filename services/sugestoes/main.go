@@ -26,15 +26,18 @@ func main() {
 	db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT`)
 	db.Exec(`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS categoria TEXT DEFAULT 'Geral'`)
 
+	log.Println("[SUGESTOES WORKER] Connecting to Redis broker...")
 	b := broker.New()
 	defer b.Close()
+	log.Println("[SUGESTOES WORKER] Redis broker connected")
 
 	h := handlers.New(db, b)
 	h.RegisterActions()
 
 	b.Subscribe("service:sugestoes")
 
-	log.Println("Sugestoes worker listening on service:sugestoes")
+	log.Println("[SUGESTOES WORKER] Listening on channel: service:sugestoes")
+	log.Println("[SUGESTOES WORKER] Ready to process requests")
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
