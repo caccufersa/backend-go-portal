@@ -9,181 +9,192 @@ import (
 	"time"
 
 	"cacc/pkg/cache"
-	"cacc/pkg/envelope"
-	"cacc/pkg/hub"
 	"cacc/pkg/models"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/lib/pq"
 )
 
 type NoticiasHandler struct {
 	db    *sql.DB
-	hub   *hub.Hub
 	redis *cache.Redis
+
+	stmtList      *sql.Stmt
+	stmtListByCat *sql.Stmt
+	stmtGet       *sql.Stmt
+	stmtDestaques *sql.Stmt
+	stmtInsert    *sql.Stmt
+	stmtDelete    *sql.Stmt
 }
 
-func NewNoticias(db *sql.DB, h *hub.Hub, r *cache.Redis) *NoticiasHandler {
-	return &NoticiasHandler{db: db, hub: h, redis: r}
+func NewNoticias(db *sql.DB, r *cache.Redis) *NoticiasHandler {
+	n := &NoticiasHandler{db: db, redis: r}
+	n.prepare()
+	return n
 }
 
-func (n *NoticiasHandler) RegisterActions() {
-	n.hub.On("noticias.list", n.listar)
-	n.hub.On("noticias.get", n.buscarPorID)
-	n.hub.On("noticias.destaques", n.destaques)
-	n.hub.On("noticias.create", n.criar)
-	n.hub.On("noticias.update", n.atualizar)
-	n.hub.On("noticias.delete", n.deletar)
+func (n *NoticiasHandler) prepare() {
+	n.stmtList, _ = n.db.Prepare(`
+		SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
+		       COALESCE(tags, '{}'), created_at, updated_at
+		FROM noticias
+		ORDER BY destaque DESC, created_at DESC
+		LIMIT $1 OFFSET $2
+	`)
+	n.stmtListByCat, _ = n.db.Prepare(`
+		SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
+		       COALESCE(tags, '{}'), created_at, updated_at
+		FROM noticias WHERE categoria = $1
+		ORDER BY destaque DESC, created_at DESC
+		LIMIT $2 OFFSET $3
+	`)
+	n.stmtGet, _ = n.db.Prepare(`
+		SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
+		       COALESCE(tags, '{}'), created_at, updated_at
+		FROM noticias WHERE id = $1
+	`)
+	n.stmtDestaques, _ = n.db.Prepare(`
+		SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
+		       COALESCE(tags, '{}'), created_at, updated_at
+		FROM noticias WHERE destaque = true
+		ORDER BY created_at DESC LIMIT 10
+	`)
+	n.stmtInsert, _ = n.db.Prepare(`
+		INSERT INTO noticias (titulo, conteudo, resumo, author, categoria, image_url, destaque, tags)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
+		          COALESCE(tags, '{}'), created_at, updated_at
+	`)
+	n.stmtDelete, _ = n.db.Prepare(`DELETE FROM noticias WHERE id = $1`)
 }
 
-func (n *NoticiasHandler) listar(env envelope.Envelope) {
-	type listReq struct {
-		Limit     int    `json:"limit"`
-		Offset    int    `json:"offset"`
-		Categoria string `json:"categoria"`
+// ──────────────────────────────────────────────
+// PUBLIC ROUTES (no auth)
+// ──────────────────────────────────────────────
+
+// GET /noticias?limit=20&offset=0&categoria=
+func (n *NoticiasHandler) Listar(c *fiber.Ctx) error {
+	limit := c.QueryInt("limit", 20)
+	offset := c.QueryInt("offset", 0)
+	categoria := c.Query("categoria")
+
+	if limit <= 0 || limit > 100 {
+		limit = 20
 	}
-	req, _ := envelope.ParseData[listReq](env)
-	if req.Limit <= 0 || req.Limit > 100 {
-		req.Limit = 20
+	if offset < 0 {
+		offset = 0
 	}
 
-	cacheKey := fmt.Sprintf("noticias:%s:%d:%d", req.Categoria, req.Limit, req.Offset)
+	cacheKey := fmt.Sprintf("noticias:list:%s:%d:%d", categoria, limit, offset)
 	var cached []models.Noticia
 	if n.redis.Get(cacheKey, &cached) {
-		n.hub.Reply(env, cached)
-		return
+		return c.JSON(cached)
 	}
 
 	var rows *sql.Rows
 	var err error
 
-	if req.Categoria != "" {
-		rows, err = n.db.Query(
-			`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
-			 COALESCE(tags, '{}'), created_at, updated_at
-			 FROM noticias WHERE categoria = $1
-			 ORDER BY destaque DESC, created_at DESC LIMIT $2 OFFSET $3`,
-			req.Categoria, req.Limit, req.Offset,
-		)
+	if categoria != "" {
+		rows, err = n.stmtListByCat.Query(categoria, limit, offset)
 	} else {
-		rows, err = n.db.Query(
-			`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
-			 COALESCE(tags, '{}'), created_at, updated_at
-			 FROM noticias
-			 ORDER BY destaque DESC, created_at DESC LIMIT $1 OFFSET $2`,
-			req.Limit, req.Offset,
-		)
+		rows, err = n.stmtList.Query(limit, offset)
 	}
-
 	if err != nil {
-		n.hub.ReplyError(env, 500, "Erro ao buscar notícias")
-		return
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao buscar notícias"})
 	}
 	defer rows.Close()
 
 	noticias := n.scanNoticias(rows)
 	n.redis.Set(cacheKey, noticias, 30*time.Second)
-	n.hub.Reply(env, noticias)
+	return c.JSON(noticias)
 }
 
-func (n *NoticiasHandler) buscarPorID(env envelope.Envelope) {
-	type getReq struct {
-		ID int `json:"id"`
-	}
-	req, _ := envelope.ParseData[getReq](env)
-	if req.ID <= 0 {
-		n.hub.ReplyError(env, 400, "ID inválido")
-		return
+// GET /noticias/:id
+func (n *NoticiasHandler) BuscarPorID(c *fiber.Ctx) error {
+	id, err := strconv.Atoi(c.Params("id"))
+	if err != nil || id <= 0 {
+		return c.Status(400).JSON(fiber.Map{"erro": "ID inválido"})
 	}
 
-	cacheKey := fmt.Sprintf("noticia:%d", req.ID)
+	cacheKey := fmt.Sprintf("noticias:item:%d", id)
 	var cached models.Noticia
 	if n.redis.Get(cacheKey, &cached) {
-		n.hub.Reply(env, cached)
-		return
+		return c.JSON(cached)
 	}
 
 	var noticia models.Noticia
 	var tags pq.StringArray
-	err := n.db.QueryRow(
-		`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
-		 COALESCE(tags, '{}'), created_at, updated_at
-		 FROM noticias WHERE id = $1`, req.ID,
-	).Scan(&noticia.ID, &noticia.Titulo, &noticia.Conteudo, &noticia.Resumo, &noticia.Author,
-		&noticia.Categoria, &noticia.ImageURL, &noticia.Destaque, &tags, &noticia.CreatedAt, &noticia.UpdatedAt)
-
+	err = n.stmtGet.QueryRow(id).Scan(
+		&noticia.ID, &noticia.Titulo, &noticia.Conteudo, &noticia.Resumo, &noticia.Author,
+		&noticia.Categoria, &noticia.ImageURL, &noticia.Destaque, &tags, &noticia.CreatedAt, &noticia.UpdatedAt,
+	)
 	if err == sql.ErrNoRows {
-		n.hub.ReplyError(env, 404, "Notícia não encontrada")
-		return
+		return c.Status(404).JSON(fiber.Map{"erro": "Notícia não encontrada"})
 	}
 	if err != nil {
-		n.hub.ReplyError(env, 500, "Erro interno")
-		return
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro interno"})
 	}
 
 	noticia.Tags = tags
 	n.parseEditorJS(&noticia)
 	n.redis.Set(cacheKey, noticia, time.Minute)
-	n.hub.Reply(env, noticia)
+	return c.JSON(noticia)
 }
 
-func (n *NoticiasHandler) destaques(env envelope.Envelope) {
+// GET /noticias/destaques
+func (n *NoticiasHandler) Destaques(c *fiber.Ctx) error {
 	var cached []models.Noticia
 	if n.redis.Get("noticias:destaques", &cached) {
-		n.hub.Reply(env, cached)
-		return
+		return c.JSON(cached)
 	}
 
-	rows, err := n.db.Query(
-		`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
-		 COALESCE(tags, '{}'), created_at, updated_at
-		 FROM noticias WHERE destaque = true
-		 ORDER BY created_at DESC LIMIT 10`,
-	)
+	rows, err := n.stmtDestaques.Query()
 	if err != nil {
-		n.hub.ReplyError(env, 500, "Erro ao buscar destaques")
-		return
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao buscar destaques"})
 	}
 	defer rows.Close()
 
 	noticias := n.scanNoticias(rows)
 	n.redis.Set("noticias:destaques", noticias, 30*time.Second)
-	n.hub.Reply(env, noticias)
+	return c.JSON(noticias)
 }
 
-func (n *NoticiasHandler) criar(env envelope.Envelope) {
+// ──────────────────────────────────────────────
+// PRIVATE ROUTES (auth required)
+// ──────────────────────────────────────────────
+
+// POST /noticias (auth required)
+func (n *NoticiasHandler) Criar(c *fiber.Ctx) error {
 	var req models.CriarNoticiaRequest
-	if err := json.Unmarshal(env.Data, &req); err != nil {
-		n.hub.ReplyError(env, 400, "JSON inválido")
-		return
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
 	}
 
 	req.Titulo = strings.TrimSpace(req.Titulo)
 	if req.Titulo == "" || req.Conteudo == nil {
-		n.hub.ReplyError(env, 400, "Título e conteúdo são obrigatórios")
-		return
+		return c.Status(400).JSON(fiber.Map{"erro": "Título e conteúdo são obrigatórios"})
 	}
 
 	conteudoStr, err := models.ParseConteudo(req.Conteudo)
 	if err != nil {
-		n.hub.ReplyError(env, 400, "Formato de conteúdo inválido")
-		return
+		return c.Status(400).JSON(fiber.Map{"erro": "Formato de conteúdo inválido"})
 	}
-
 	conteudoStr = strings.TrimSpace(conteudoStr)
 	if conteudoStr == "" {
-		n.hub.ReplyError(env, 400, "Conteúdo não pode ser vazio")
-		return
+		return c.Status(400).JSON(fiber.Map{"erro": "Conteúdo não pode ser vazio"})
 	}
 
 	if req.Categoria == "" {
 		req.Categoria = "Geral"
 	}
 	if req.Resumo == "" {
-		req.Resumo = n.gerarResumo(conteudoStr)
+		req.Resumo = gerarResumo(conteudoStr)
 	}
+
+	username, _ := c.Locals("username").(string)
 	if req.Author == "" {
-		if env.Username != "" {
-			req.Author = env.Username
+		if username != "" {
+			req.Author = username
 		} else {
 			req.Author = "Anônimo"
 		}
@@ -191,42 +202,34 @@ func (n *NoticiasHandler) criar(env envelope.Envelope) {
 
 	var noticia models.Noticia
 	var tags pq.StringArray
-	err = n.db.QueryRow(
-		`INSERT INTO noticias (titulo, conteudo, resumo, author, categoria, image_url, destaque, tags)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
-		 COALESCE(tags, '{}'), created_at, updated_at`,
-		req.Titulo, conteudoStr, req.Resumo, req.Author, req.Categoria, req.ImageURL, req.Destaque, pq.Array(req.Tags),
-	).Scan(&noticia.ID, &noticia.Titulo, &noticia.Conteudo, &noticia.Resumo, &noticia.Author,
-		&noticia.Categoria, &noticia.ImageURL, &noticia.Destaque, &tags, &noticia.CreatedAt, &noticia.UpdatedAt)
-
+	err = n.stmtInsert.QueryRow(
+		req.Titulo, conteudoStr, req.Resumo, req.Author, req.Categoria,
+		req.ImageURL, req.Destaque, pq.Array(req.Tags),
+	).Scan(
+		&noticia.ID, &noticia.Titulo, &noticia.Conteudo, &noticia.Resumo, &noticia.Author,
+		&noticia.Categoria, &noticia.ImageURL, &noticia.Destaque, &tags, &noticia.CreatedAt, &noticia.UpdatedAt,
+	)
 	if err != nil {
-		n.hub.ReplyError(env, 500, "Erro ao criar notícia")
-		return
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao criar notícia"})
 	}
 
 	noticia.Tags = tags
 	n.parseEditorJS(&noticia)
+	n.invalidateCache()
 
-	n.redis.DelPattern("noticias:*")
-	n.hub.Reply(env, noticia)
-	n.hub.Broadcast("new_noticia", "noticias", noticia)
+	return c.Status(201).JSON(noticia)
 }
 
-func (n *NoticiasHandler) atualizar(env envelope.Envelope) {
-	type updateEnv struct {
-		ID int `json:"id"`
-		models.AtualizarNoticiaRequest
-	}
-	var req updateEnv
-	if err := json.Unmarshal(env.Data, &req); err != nil {
-		n.hub.ReplyError(env, 400, "JSON inválido")
-		return
+// PUT /noticias/:id (auth required)
+func (n *NoticiasHandler) Atualizar(c *fiber.Ctx) error {
+	id, err := strconv.Atoi(c.Params("id"))
+	if err != nil || id <= 0 {
+		return c.Status(400).JSON(fiber.Map{"erro": "ID inválido"})
 	}
 
-	if req.ID <= 0 {
-		n.hub.ReplyError(env, 400, "ID inválido")
-		return
+	var req models.AtualizarNoticiaRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
 	}
 
 	sets := []string{}
@@ -241,8 +244,7 @@ func (n *NoticiasHandler) atualizar(env envelope.Envelope) {
 	if req.Conteudo != nil {
 		conteudoStr, err := models.ParseConteudo(req.Conteudo)
 		if err != nil {
-			n.hub.ReplyError(env, 400, "Formato de conteúdo inválido")
-			return
+			return c.Status(400).JSON(fiber.Map{"erro": "Formato de conteúdo inválido"})
 		}
 		sets = append(sets, "conteudo = $"+strconv.Itoa(argIdx))
 		args = append(args, conteudoStr)
@@ -275,77 +277,74 @@ func (n *NoticiasHandler) atualizar(env envelope.Envelope) {
 	}
 
 	if len(sets) == 0 {
-		n.hub.ReplyError(env, 400, "Nenhum campo para atualizar")
-		return
+		return c.Status(400).JSON(fiber.Map{"erro": "Nenhum campo para atualizar"})
 	}
 
 	sets = append(sets, "updated_at = NOW()")
 	query := "UPDATE noticias SET " + strings.Join(sets, ", ") + " WHERE id = $" + strconv.Itoa(argIdx)
-	args = append(args, req.ID)
+	args = append(args, id)
 
 	result, err := n.db.Exec(query, args...)
 	if err != nil {
-		n.hub.ReplyError(env, 500, "Erro ao atualizar")
-		return
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao atualizar"})
 	}
 
 	rowsAff, _ := result.RowsAffected()
 	if rowsAff == 0 {
-		n.hub.ReplyError(env, 404, "Notícia não encontrada")
-		return
+		return c.Status(404).JSON(fiber.Map{"erro": "Notícia não encontrada"})
 	}
 
+	// Re-fetch updated noticia
 	var noticia models.Noticia
 	var tags pq.StringArray
-	n.db.QueryRow(
-		`SELECT id, titulo, conteudo, resumo, author, categoria, COALESCE(image_url,''), destaque,
-		 COALESCE(tags, '{}'), created_at, updated_at
-		 FROM noticias WHERE id = $1`, req.ID,
-	).Scan(&noticia.ID, &noticia.Titulo, &noticia.Conteudo, &noticia.Resumo, &noticia.Author,
-		&noticia.Categoria, &noticia.ImageURL, &noticia.Destaque, &tags, &noticia.CreatedAt, &noticia.UpdatedAt)
+	n.stmtGet.QueryRow(id).Scan(
+		&noticia.ID, &noticia.Titulo, &noticia.Conteudo, &noticia.Resumo, &noticia.Author,
+		&noticia.Categoria, &noticia.ImageURL, &noticia.Destaque, &tags, &noticia.CreatedAt, &noticia.UpdatedAt,
+	)
 	noticia.Tags = tags
 	n.parseEditorJS(&noticia)
+	n.invalidateCache()
+	n.redis.Del(fmt.Sprintf("noticias:item:%d", id))
 
-	n.redis.DelPattern("noticias:*")
-	n.redis.Del(fmt.Sprintf("noticia:%d", req.ID))
-	n.hub.Reply(env, noticia)
+	return c.JSON(noticia)
 }
 
-func (n *NoticiasHandler) deletar(env envelope.Envelope) {
-	type deleteReq struct {
-		ID int `json:"id"`
-	}
-	req, _ := envelope.ParseData[deleteReq](env)
-	if req.ID <= 0 {
-		n.hub.ReplyError(env, 400, "ID inválido")
-		return
+// DELETE /noticias/:id (auth required)
+func (n *NoticiasHandler) Deletar(c *fiber.Ctx) error {
+	id, err := strconv.Atoi(c.Params("id"))
+	if err != nil || id <= 0 {
+		return c.Status(400).JSON(fiber.Map{"erro": "ID inválido"})
 	}
 
-	result, err := n.db.Exec(`DELETE FROM noticias WHERE id = $1`, req.ID)
+	result, err := n.stmtDelete.Exec(id)
 	if err != nil {
-		n.hub.ReplyError(env, 500, "Erro ao deletar")
-		return
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao deletar"})
 	}
 
 	rowsAff, _ := result.RowsAffected()
 	if rowsAff == 0 {
-		n.hub.ReplyError(env, 404, "Notícia não encontrada")
-		return
+		return c.Status(404).JSON(fiber.Map{"erro": "Notícia não encontrada"})
 	}
 
-	n.redis.DelPattern("noticias:*")
-	n.redis.Del(fmt.Sprintf("noticia:%d", req.ID))
-	n.hub.Reply(env, map[string]interface{}{"id": req.ID, "status": "ok"})
-	n.hub.Broadcast("noticia_deleted", "noticias", map[string]int{"id": req.ID})
+	n.invalidateCache()
+	n.redis.Del(fmt.Sprintf("noticias:item:%d", id))
+
+	return c.JSON(fiber.Map{"id": id, "status": "deleted"})
 }
+
+// ──────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────
 
 func (n *NoticiasHandler) scanNoticias(rows *sql.Rows) []models.Noticia {
 	noticias := []models.Noticia{}
 	for rows.Next() {
 		var noticia models.Noticia
 		var tags pq.StringArray
-		if err := rows.Scan(&noticia.ID, &noticia.Titulo, &noticia.Conteudo, &noticia.Resumo, &noticia.Author,
-			&noticia.Categoria, &noticia.ImageURL, &noticia.Destaque, &tags, &noticia.CreatedAt, &noticia.UpdatedAt); err != nil {
+		if err := rows.Scan(
+			&noticia.ID, &noticia.Titulo, &noticia.Conteudo, &noticia.Resumo, &noticia.Author,
+			&noticia.Categoria, &noticia.ImageURL, &noticia.Destaque, &tags, &noticia.CreatedAt, &noticia.UpdatedAt,
+		); err != nil {
 			continue
 		}
 		noticia.Tags = tags
@@ -362,7 +361,11 @@ func (n *NoticiasHandler) parseEditorJS(noticia *models.Noticia) {
 	}
 }
 
-func (n *NoticiasHandler) gerarResumo(conteudoStr string) string {
+func (n *NoticiasHandler) invalidateCache() {
+	n.redis.DelPattern("noticias:*")
+}
+
+func gerarResumo(conteudoStr string) string {
 	var editorData models.EditorJSData
 	if err := json.Unmarshal([]byte(conteudoStr), &editorData); err == nil {
 		resumoText := ""

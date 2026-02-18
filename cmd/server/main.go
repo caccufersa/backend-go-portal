@@ -24,9 +24,11 @@ func main() {
 	db := database.Connect()
 	defer db.Close()
 
-	db.SetMaxOpenConns(20)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	// Serverless PG: keep pool small, connections short-lived
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(3 * time.Minute)
+	db.SetConnMaxIdleTime(30 * time.Second)
 
 	setupDatabase(db)
 	go cleanExpiredSessions(db)
@@ -40,12 +42,10 @@ func main() {
 
 	auth := handlers.NewAuth(db, wsHub, redis)
 	social := handlers.NewSocial(db, wsHub, redis)
-	noticias := handlers.NewNoticias(db, wsHub, redis)
-	sugestoes := handlers.NewSugestoes(db, wsHub, redis)
+	noticias := handlers.NewNoticias(db, redis)
+	sugestoes := handlers.NewSugestoes(db, redis)
 
 	social.RegisterActions()
-	noticias.RegisterActions()
-	sugestoes.RegisterActions()
 
 	app := server.NewApp("portal")
 
@@ -76,10 +76,29 @@ func main() {
 	protected.Get("/sessions", auth.Sessions)
 
 	app.Get("/hub/status", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"clients": wsHub.ClientCount()})
+		return c.JSON(fiber.Map{
+			"clients":       wsHub.ClientCount(),
+			"authenticated": wsHub.AuthenticatedCount(),
+		})
 	})
 
 	app.Get("/internal/user/:uuid", auth.GetUserByUUID)
+
+	// ── Notícias REST (public read, private write) ──
+	noticiasGroup := app.Group("/noticias")
+	noticiasGroup.Get("/destaques", noticias.Destaques)
+	noticiasGroup.Get("/:id", noticias.BuscarPorID)
+	noticiasGroup.Get("/", noticias.Listar)
+	noticiasPriv := noticiasGroup.Group("", middleware.AuthMiddleware)
+	noticiasPriv.Post("/", noticias.Criar)
+	noticiasPriv.Put("/:id", noticias.Atualizar)
+	noticiasPriv.Delete("/:id", noticias.Deletar)
+
+	// ── Sugestões REST (public read, auth write) ──
+	sugestoesGroup := app.Group("/sugestoes")
+	sugestoesGroup.Get("/", sugestoes.Listar)
+	sugestoesPriv := sugestoesGroup.Group("", middleware.AuthMiddleware)
+	sugestoesPriv.Post("/", sugestoes.Criar)
 
 	app.Use("/ws", parseWSToken)
 
@@ -175,8 +194,10 @@ func setupDatabase(db *sql.DB) {
 			id SERIAL PRIMARY KEY,
 			texto TEXT NOT NULL,
 			author TEXT NOT NULL DEFAULT 'Anônimo',
+			user_id INT REFERENCES users(id) ON DELETE SET NULL,
 			parent_id INT REFERENCES posts(id) ON DELETE CASCADE,
 			likes INT NOT NULL DEFAULT 0,
+			reply_count INT NOT NULL DEFAULT 0,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS noticias (
@@ -207,6 +228,10 @@ func setupDatabase(db *sql.DB) {
 	alterations := []string{
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS uuid UUID UNIQUE DEFAULT gen_random_uuid()`,
 		`UPDATE users SET uuid = gen_random_uuid() WHERE uuid IS NULL`,
+		`ALTER TABLE posts ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL`,
+		`ALTER TABLE posts ADD COLUMN IF NOT EXISTS reply_count INT NOT NULL DEFAULT 0`,
+		// Backfill reply_count for existing data
+		`UPDATE posts p SET reply_count = (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id) WHERE reply_count = 0`,
 		`ALTER TABLE noticias ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}'`,
 		`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT`,
 		`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS categoria TEXT DEFAULT 'Geral'`,
@@ -226,6 +251,11 @@ func setupDatabase(db *sql.DB) {
 		`CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_posts_likes ON posts(likes DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author)`,
+		`CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_posts_feed ON posts(created_at DESC) WHERE parent_id IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_posts_user_created ON posts(user_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_posts_parent_created ON posts(parent_id, created_at ASC)`,
+		`CREATE INDEX IF NOT EXISTS idx_posts_reply_count ON posts(reply_count) WHERE reply_count > 0`,
 		`CREATE INDEX IF NOT EXISTS idx_noticias_created ON noticias(created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_noticias_categoria ON noticias(categoria)`,
 		`CREATE INDEX IF NOT EXISTS idx_noticias_destaque ON noticias(destaque) WHERE destaque = true`,

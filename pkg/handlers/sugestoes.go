@@ -2,42 +2,51 @@ package handlers
 
 import (
 	"database/sql"
+	"strings"
+	"time"
 
 	"cacc/pkg/cache"
-	"cacc/pkg/envelope"
-	"cacc/pkg/hub"
 	"cacc/pkg/models"
+
+	"github.com/gofiber/fiber/v2"
 )
 
 type SugestoesHandler struct {
 	db    *sql.DB
-	hub   *hub.Hub
 	redis *cache.Redis
+
+	stmtList   *sql.Stmt
+	stmtInsert *sql.Stmt
 }
 
-func NewSugestoes(db *sql.DB, h *hub.Hub, r *cache.Redis) *SugestoesHandler {
-	return &SugestoesHandler{db: db, hub: h, redis: r}
+func NewSugestoes(db *sql.DB, r *cache.Redis) *SugestoesHandler {
+	sg := &SugestoesHandler{db: db, redis: r}
+	sg.prepare()
+	return sg
 }
 
-func (sg *SugestoesHandler) RegisterActions() {
-	sg.hub.On("sugestoes.list", sg.listar)
-	sg.hub.On("sugestoes.create", sg.criar)
+func (sg *SugestoesHandler) prepare() {
+	sg.stmtList, _ = sg.db.Prepare(`
+		SELECT id, texto, data_criacao, COALESCE(author, 'Anônimo'), COALESCE(categoria, 'Geral')
+		FROM sugestoes ORDER BY id DESC LIMIT 200
+	`)
+	sg.stmtInsert, _ = sg.db.Prepare(`
+		INSERT INTO sugestoes (texto, author, categoria)
+		VALUES ($1, $2, $3)
+		RETURNING id, data_criacao
+	`)
 }
 
-func (sg *SugestoesHandler) listar(env envelope.Envelope) {
+// GET /sugestoes
+func (sg *SugestoesHandler) Listar(c *fiber.Ctx) error {
 	var cached []models.Sugestao
 	if sg.redis.Get("sugestoes:all", &cached) {
-		sg.hub.Reply(env, cached)
-		return
+		return c.JSON(cached)
 	}
 
-	rows, err := sg.db.Query(
-		`SELECT id, texto, data_criacao, COALESCE(author, 'Anônimo'), COALESCE(categoria, 'Geral')
-		 FROM sugestoes ORDER BY id DESC`,
-	)
+	rows, err := sg.stmtList.Query()
 	if err != nil {
-		sg.hub.ReplyError(env, 500, "Erro no banco")
-		return
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro no banco"})
 	}
 	defer rows.Close()
 
@@ -50,39 +59,48 @@ func (sg *SugestoesHandler) listar(env envelope.Envelope) {
 		lista = append(lista, s)
 	}
 
-	sg.redis.Set("sugestoes:all", lista, 30e9)
-	sg.hub.Reply(env, lista)
+	sg.redis.Set("sugestoes:all", lista, 30*time.Second)
+	return c.JSON(lista)
 }
 
-func (sg *SugestoesHandler) criar(env envelope.Envelope) {
-	req, err := envelope.ParseData[models.Sugestao](env)
+// POST /sugestoes (auth required)
+func (sg *SugestoesHandler) Criar(c *fiber.Ctx) error {
+	var req struct {
+		Texto     string `json:"texto"`
+		Categoria string `json:"categoria"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
+	}
+
+	texto := strings.TrimSpace(req.Texto)
+	if texto == "" {
+		return c.Status(400).JSON(fiber.Map{"erro": "Texto não pode ser vazio"})
+	}
+	if len(texto) > 2000 {
+		return c.Status(400).JSON(fiber.Map{"erro": "Texto muito longo (max 2000)"})
+	}
+
+	username, _ := c.Locals("username").(string)
+	if username == "" {
+		username = "Anônimo"
+	}
+
+	categoria := strings.TrimSpace(req.Categoria)
+	if categoria == "" {
+		categoria = "Geral"
+	}
+
+	var s models.Sugestao
+	err := sg.stmtInsert.QueryRow(texto, username, categoria).Scan(&s.ID, &s.CreatedAt)
 	if err != nil {
-		sg.hub.ReplyError(env, 400, "JSON inválido")
-		return
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao salvar"})
 	}
 
-	if req.Author == "" {
-		if env.Username != "" {
-			req.Author = env.Username
-		} else {
-			req.Author = "Anônimo"
-		}
-	}
-	if req.Categoria == "" {
-		req.Categoria = "Geral"
-	}
-
-	err = sg.db.QueryRow(
-		`INSERT INTO sugestoes (texto, author, categoria) VALUES ($1, $2, $3) RETURNING id, data_criacao`,
-		req.Texto, req.Author, req.Categoria,
-	).Scan(&req.ID, &req.CreatedAt)
-
-	if err != nil {
-		sg.hub.ReplyError(env, 500, "Erro ao salvar")
-		return
-	}
+	s.Texto = texto
+	s.Author = username
+	s.Categoria = categoria
 
 	sg.redis.Del("sugestoes:all")
-	sg.hub.Reply(env, req)
-	sg.hub.Broadcast("new_sugestao", "sugestoes", req)
+	return c.Status(201).JSON(s)
 }

@@ -9,6 +9,7 @@ require (
 	github.com/lib/pq v1.11.1
 	github.com/redis/go-redis/v9 v9.18.0
 	golang.org/x/crypto v0.31.0
+	google.golang.org/protobuf v1.36.11
 )
 
 require (

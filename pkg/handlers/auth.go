@@ -457,20 +457,16 @@ func generateRefreshToken() string {
 
 func (ah *AuthHandler) setRefreshCookie(c *fiber.Ctx, token string, expires time.Time) {
 	secure := os.Getenv("GO_ENV") == "production"
-	sameSite := "Lax"
-	if secure {
-		sameSite = "None"
-	}
 	c.Cookie(&fiber.Cookie{
 		Name: "refresh_token", Value: token, Expires: expires,
-		HTTPOnly: true, Secure: secure, SameSite: sameSite, Path: "/auth",
+		HTTPOnly: true, Secure: secure, SameSite: "Lax", Path: "/",
 	})
 }
 
 func (ah *AuthHandler) clearRefreshCookie(c *fiber.Ctx) {
 	c.Cookie(&fiber.Cookie{
 		Name: "refresh_token", Value: "", Expires: time.Now().Add(-1 * time.Hour),
-		HTTPOnly: true, Path: "/auth",
+		HTTPOnly: true, Path: "/",
 	})
 }
 

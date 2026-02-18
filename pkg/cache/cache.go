@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/protobuf/proto"
 )
 
 type Redis struct {
@@ -39,6 +40,7 @@ func New() *Redis {
 	return &Redis{client: client, ctx: ctx}
 }
 
+// Get retrieves JSON-encoded value from cache
 func (r *Redis) Get(key string, dest interface{}) bool {
 	val, err := r.client.Get(r.ctx, key).Result()
 	if err != nil {
@@ -47,8 +49,27 @@ func (r *Redis) Get(key string, dest interface{}) bool {
 	return json.Unmarshal([]byte(val), dest) == nil
 }
 
+// Set stores JSON-encoded value in cache
 func (r *Redis) Set(key string, value interface{}, ttl time.Duration) {
 	data, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	r.client.Set(r.ctx, key, data, ttl)
+}
+
+// GetProto retrieves protobuf-encoded value from cache
+func (r *Redis) GetProto(key string, dest proto.Message) bool {
+	val, err := r.client.Get(r.ctx, key).Bytes()
+	if err != nil {
+		return false
+	}
+	return proto.Unmarshal(val, dest) == nil
+}
+
+// SetProto stores protobuf-encoded value in cache (faster + smaller)
+func (r *Redis) SetProto(key string, msg proto.Message, ttl time.Duration) {
+	data, err := proto.Marshal(msg)
 	if err != nil {
 		return
 	}
