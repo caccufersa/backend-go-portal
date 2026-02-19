@@ -80,14 +80,26 @@ func (r *Redis) Del(keys ...string) {
 	r.client.Del(r.ctx, keys...)
 }
 
+// DelPattern deletes keys matching a pattern in batches to look easy on memory
 func (r *Redis) DelPattern(pattern string) {
-	iter := r.client.Scan(r.ctx, 0, pattern, 100).Iterator()
-	var keys []string
+	iter := r.client.Scan(r.ctx, 0, pattern, 0).Iterator()
+	const batchSize = 100
+
+	pipe := r.client.Pipeline()
+	count := 0
+
 	for iter.Next(r.ctx) {
-		keys = append(keys, iter.Val())
+		pipe.Del(r.ctx, iter.Val())
+		count++
+
+		if count >= batchSize {
+			pipe.Exec(r.ctx)
+			count = 0
+		}
 	}
-	if len(keys) > 0 {
-		r.client.Del(r.ctx, keys...)
+
+	if count > 0 {
+		pipe.Exec(r.ctx)
 	}
 }
 
