@@ -44,6 +44,7 @@ func main() {
 	social := handlers.NewSocial(db, wsHub, redis)
 	noticias := handlers.NewNoticias(db, redis)
 	sugestoes := handlers.NewSugestoes(db, redis)
+	bus := handlers.NewBus(db, redis)
 
 	social.RegisterActions()
 
@@ -99,6 +100,15 @@ func main() {
 	sugestoesGroup.Get("/", sugestoes.Listar)
 	sugestoesPriv := sugestoesGroup.Group("", middleware.AuthMiddleware)
 	sugestoesPriv.Post("/", sugestoes.Criar)
+
+	// ── Bus Reserva (High Performance) ──
+	busGroup := app.Group("/bus")
+	busGroup.Get("/:id/seats", bus.GetSeats) // Public read (fast)
+
+	busPriv := busGroup.Group("", middleware.AuthMiddleware)
+	busPriv.Post("/reserve", bus.Reserve)
+	busPriv.Post("/cancel", bus.Cancel)
+	busPriv.Get("/me", bus.MyReservations)
 
 	app.Use("/ws", parseWSToken)
 
@@ -225,6 +235,20 @@ func setupDatabase(db *sql.DB) {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (user_id, post_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS social_profiles (
+			user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			display_name TEXT,
+			bio TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS bus_seats (
+			bus_id INT NOT NULL,
+			seat_number INT NOT NULL,
+			user_id INT REFERENCES users(id) ON DELETE SET NULL,
+			reserved_at TIMESTAMP,
+			PRIMARY KEY (bus_id, seat_number)
+		)`,
 	}
 
 	for _, s := range schemas {
@@ -241,6 +265,10 @@ func setupDatabase(db *sql.DB) {
 		`ALTER TABLE noticias ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}'`,
 		`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT`,
 		`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS categoria TEXT DEFAULT 'Geral'`,
+		// Populate bus 1 with 40 seats if empty
+		`INSERT INTO bus_seats (bus_id, seat_number) 
+		 SELECT 1, generate_series(1, 40)
+		 WHERE NOT EXISTS (SELECT 1 FROM bus_seats WHERE bus_id = 1)`,
 	}
 
 	for _, a := range alterations {

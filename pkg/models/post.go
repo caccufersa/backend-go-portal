@@ -9,7 +9,8 @@ import (
 type Post struct {
 	ID         int       `json:"id"`
 	Texto      string    `json:"texto"`
-	Author     string    `json:"author"`
+	Author     string    `json:"author"`      // Username / @handle
+	AuthorName string    `json:"author_name"` // Display Name (perfil social)
 	UserID     int       `json:"user_id"`
 	ParentID   *int      `json:"parent_id,omitempty"`
 	Likes      int       `json:"likes"`
@@ -62,8 +63,10 @@ func PostFromProto(pb *socialpb.Post) Post {
 }
 
 type Profile struct {
-	Username   string `json:"username"`
-	TotalPosts int    `json:"total_posts"`
-	TotalLikes int    `json:"total_likes"`
-	Posts      []Post `json:"posts"`
+	Username    string `json:"username"`     // @handle
+	DisplayName string `json:"display_name"` // Nome Perfil
+	Bio         string `json:"bio"`
+	TotalPosts  int    `json:"total_posts"`
+	TotalLikes  int    `json:"total_likes"`
+	Posts       []Post `json:"posts"`
 }

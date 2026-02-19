@@ -23,13 +23,16 @@ type SocialHandler struct {
 	redis *cache.Redis
 
 	// Prepared statements for hot paths
-	stmtFeed         *sql.Stmt
-	stmtThread       *sql.Stmt
-	stmtReplies      *sql.Stmt
-	stmtProfile      *sql.Stmt
-	stmtProfileStats *sql.Stmt
-	stmtInsertPost   *sql.Stmt
-	stmtInsertReply  *sql.Stmt
+	stmtFeed          *sql.Stmt
+	stmtThread        *sql.Stmt
+	stmtReplies       *sql.Stmt
+	stmtProfile       *sql.Stmt
+	stmtProfileStats  *sql.Stmt
+	stmtProfileInfo   *sql.Stmt // Busca bio/display do usuario
+	stmtUpdateProfile *sql.Stmt // Atualiza bio/display
+
+	stmtInsertPost  *sql.Stmt
+	stmtInsertReply *sql.Stmt
 
 	// Like system
 	stmtLikeInsert *sql.Stmt // Tenta inserir na post_likes
@@ -50,12 +53,13 @@ func NewSocial(db *sql.DB, h *hub.Hub, r *cache.Redis) *SocialHandler {
 func (s *SocialHandler) prepareStatements() {
 	var err error
 
-	// FEED: agora verifica se o usuário (param $3) curtiu
-	// Usamos EXISTS ou COALESCE na junção. Assumindo $3 = user_id do request
+	// FEED: JOINS para pegar handle (@username) e display name atualizados
 	s.stmtFeed, err = s.db.Prepare(`
-		SELECT p.id, p.texto, p.author, COALESCE(p.user_id, 0), p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, u.username, COALESCE(sp.display_name, u.username), p.user_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $3) AS liked
 		FROM posts p
+		JOIN users u ON p.user_id = u.id
+		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
 		WHERE p.parent_id IS NULL
 		ORDER BY p.created_at DESC
 		LIMIT $1 OFFSET $2
@@ -65,18 +69,24 @@ func (s *SocialHandler) prepareStatements() {
 	}
 
 	s.stmtThread, err = s.db.Prepare(`
-		SELECT p.id, p.texto, p.author, COALESCE(p.user_id, 0), p.parent_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, u.username, COALESCE(sp.display_name, u.username), p.user_id, p.parent_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $2) AS liked
-		FROM posts p WHERE p.id = $1
+		FROM posts p
+		JOIN users u ON p.user_id = u.id
+		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
+		WHERE p.id = $1
 	`)
 	if err != nil {
 		log.Fatalf("[SOCIAL] FATAL: prepare thread: %v", err)
 	}
 
 	s.stmtReplies, err = s.db.Prepare(`
-		SELECT p.id, p.texto, p.author, COALESCE(p.user_id, 0), p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, u.username, COALESCE(sp.display_name, u.username), p.user_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $2) AS liked
-		FROM posts p WHERE p.parent_id = $1
+		FROM posts p
+		JOIN users u ON p.user_id = u.id
+		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
+		WHERE p.parent_id = $1
 		ORDER BY p.created_at ASC
 		LIMIT 50
 	`)
@@ -85,9 +95,12 @@ func (s *SocialHandler) prepareStatements() {
 	}
 
 	s.stmtProfile, err = s.db.Prepare(`
-		SELECT p.id, p.texto, p.author, COALESCE(p.user_id, 0), p.parent_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, u.username, COALESCE(sp.display_name, u.username), p.user_id, p.parent_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $2) AS liked
-		FROM posts p WHERE p.user_id = $1
+		FROM posts p
+		JOIN users u ON p.user_id = u.id
+		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
+		WHERE p.user_id = $1
 		ORDER BY p.created_at DESC
 		LIMIT 100
 	`)
@@ -101,6 +114,30 @@ func (s *SocialHandler) prepareStatements() {
 	`)
 	if err != nil {
 		log.Fatalf("[SOCIAL] FATAL: prepare profile stats: %v", err)
+	}
+
+	// Busca bio e display name
+	s.stmtProfileInfo, err = s.db.Prepare(`
+		SELECT u.username, COALESCE(sp.display_name, u.username), COALESCE(sp.bio, '')
+		FROM users u
+		LEFT JOIN social_profiles sp ON u.id = sp.user_id
+		WHERE u.id = $1
+	`)
+	if err != nil {
+		log.Fatalf("[SOCIAL] FATAL: prepare profile info: %v", err)
+	}
+
+	// Atualiza profile (upsert)
+	s.stmtUpdateProfile, err = s.db.Prepare(`
+		INSERT INTO social_profiles (user_id, display_name, bio, updated_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (user_id) DO UPDATE 
+		SET display_name = EXCLUDED.display_name, 
+		    bio = EXCLUDED.bio,
+		    updated_at = NOW()
+	`)
+	if err != nil {
+		log.Fatalf("[SOCIAL] FATAL: prepare update profile: %v", err)
 	}
 
 	s.stmtInsertPost, err = s.db.Prepare(`
@@ -176,6 +213,7 @@ func (s *SocialHandler) prepareStatements() {
 }
 
 func (s *SocialHandler) RegisterActions() {
+	s.hub.On("social.profile.update", s.atualizarPerfil)
 	s.hub.On("social.feed", s.listarFeed)
 	s.hub.On("social.thread", s.buscarThread)
 	s.hub.On("social.profile", s.buscarPerfil)
@@ -222,7 +260,7 @@ func (s *SocialHandler) listarFeed(env envelope.Envelope) {
 	var postIDs []int
 	for rows.Next() {
 		var p models.Post
-		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.UserID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked); err != nil {
+		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.UserID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked); err != nil {
 			continue
 		}
 		p.Replies = []models.Post{}
@@ -256,9 +294,11 @@ func (s *SocialHandler) batchLoadReplies(parentIDs []int, userID int) map[int][]
 	}
 
 	query := fmt.Sprintf(`
-		SELECT p.id, p.texto, p.author, COALESCE(p.user_id, 0), p.parent_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, u.username, COALESCE(sp.display_name, u.username), p.user_id, p.parent_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $1) AS liked
 		FROM posts p
+		JOIN users u ON p.user_id = u.id
+		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
 		WHERE p.parent_id IN (%s)
 		ORDER BY p.created_at ASC
 	`, strings.Join(placeholders, ","))
@@ -279,7 +319,7 @@ func (s *SocialHandler) batchLoadReplies(parentIDs []int, userID int) map[int][]
 	for rows.Next() {
 		var r models.Post
 		var parentID int
-		if err := rows.Scan(&r.ID, &r.Texto, &r.Author, &r.UserID, &parentID, &r.Likes, &r.ReplyCount, &r.CreatedAt, &r.Liked); err != nil {
+		if err := rows.Scan(&r.ID, &r.Texto, &r.Author, &r.AuthorName, &r.UserID, &parentID, &r.Likes, &r.ReplyCount, &r.CreatedAt, &r.Liked); err != nil {
 			continue
 		}
 		r.ParentID = &parentID
@@ -313,7 +353,7 @@ func (s *SocialHandler) buscarThread(env envelope.Envelope) {
 
 	var p models.Post
 	err := s.stmtThread.QueryRow(req.ID, env.UserID).Scan(
-		&p.ID, &p.Texto, &p.Author, &p.UserID, &p.ParentID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked,
+		&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.UserID, &p.ParentID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked,
 	)
 	if err == sql.ErrNoRows {
 		s.hub.ReplyError(env, 404, "Post não encontrado")
@@ -343,7 +383,7 @@ func (s *SocialHandler) loadRepliesRecursive(parentID int, maxDepth int, userID 
 	replies := []models.Post{}
 	for rows.Next() {
 		var r models.Post
-		if err := rows.Scan(&r.ID, &r.Texto, &r.Author, &r.UserID, &r.Likes, &r.ReplyCount, &r.CreatedAt, &r.Liked); err != nil {
+		if err := rows.Scan(&r.ID, &r.Texto, &r.Author, &r.AuthorName, &r.UserID, &r.Likes, &r.ReplyCount, &r.CreatedAt, &r.Liked); err != nil {
 			continue
 		}
 		pid := parentID
@@ -418,7 +458,7 @@ func (s *SocialHandler) buscarPerfil(env envelope.Envelope) {
 	posts := []models.Post{}
 	for rows.Next() {
 		var p models.Post
-		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.UserID, &p.ParentID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked); err != nil {
+		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.UserID, &p.ParentID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked); err != nil {
 			continue
 		}
 		p.Replies = []models.Post{}
@@ -439,19 +479,72 @@ func (s *SocialHandler) buscarPerfil(env envelope.Envelope) {
 		}
 	}
 
-	if username == "" {
-		s.db.QueryRow(`SELECT username FROM users WHERE id = $1`, userID).Scan(&username)
+	// Fetch Bio and Display Name
+	var bio, displayName string
+	if err := s.stmtProfileInfo.QueryRow(userID).Scan(&username, &displayName, &bio); err != nil {
+		// Fallback se não achar (não deveria acontecer se existe user)
+		log.Printf("[SOCIAL] Profile Info Err: %v", err)
 	}
 
 	profile := models.Profile{
-		Username:   username,
-		TotalPosts: totalPosts,
-		TotalLikes: totalLikes,
-		Posts:      posts,
+		Username:    username,    // @handle
+		DisplayName: displayName, // Nome bonito
+		Bio:         bio,
+		TotalPosts:  totalPosts,
+		TotalLikes:  totalLikes,
+		Posts:       posts,
 	}
 
 	s.redis.Set(cacheKey, profile, 30*time.Second)
 	s.hub.Reply(env, profile)
+}
+
+// ──────────────────────────────────────────────
+// UPDATE PROFILE
+// ──────────────────────────────────────────────
+
+func (s *SocialHandler) atualizarPerfil(env envelope.Envelope) {
+	if env.UserID <= 0 {
+		s.hub.ReplyError(env, 401, "Autenticação necessária")
+		return
+	}
+
+	type updateProfileReq struct {
+		DisplayName string `json:"display_name"`
+		Bio         string `json:"bio"`
+	}
+	req, _ := envelope.ParseData[updateProfileReq](env)
+
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.Bio = strings.TrimSpace(req.Bio)
+
+	if len(req.DisplayName) > 50 {
+		s.hub.ReplyError(env, 400, "Nome muito longo (max 50)")
+		return
+	}
+	if len(req.Bio) > 160 {
+		s.hub.ReplyError(env, 400, "Bio muito longa (max 160)")
+		return
+	}
+
+	_, err := s.stmtUpdateProfile.Exec(env.UserID, req.DisplayName, req.Bio)
+	if err != nil {
+		log.Printf("[SOCIAL] Erro update profile: %v", err)
+		s.hub.ReplyError(env, 500, "Erro ao atualizar perfil")
+		return
+	}
+
+	// Invalidate caches
+	s.redis.Del(fmt.Sprintf("social:profile:%d", env.UserID))
+	// Também invalidar feeds? Não precisa, pois o feed expira rápido (15s)
+	// mas se quisermos feedback imediato, seria bom.
+	s.invalidateFeedCache()
+
+	s.hub.Reply(env, map[string]string{
+		"status":       "updated",
+		"display_name": req.DisplayName,
+		"bio":          req.Bio,
+	})
 }
 
 // ──────────────────────────────────────────────
@@ -489,6 +582,14 @@ func (s *SocialHandler) criarPost(env envelope.Envelope) {
 
 	p.Texto = texto
 	p.Author = env.Username
+	p.AuthorName = env.Username // Default display name = username inicialmente
+
+	// Tentativa de pegar DisplayName atual (opcional, senão vai username)
+	var dn string
+	if err := s.db.QueryRow(`SELECT display_name FROM social_profiles WHERE user_id = $1`, env.UserID).Scan(&dn); err == nil && dn != "" {
+		p.AuthorName = dn
+	}
+
 	p.UserID = env.UserID
 	p.Likes = 0
 	p.ReplyCount = 0
@@ -546,6 +647,13 @@ func (s *SocialHandler) comentar(env envelope.Envelope) {
 
 	reply.Texto = texto
 	reply.Author = env.Username
+	reply.AuthorName = env.Username // Default
+
+	var dn string
+	if err := s.db.QueryRow(`SELECT display_name FROM social_profiles WHERE user_id = $1`, env.UserID).Scan(&dn); err == nil && dn != "" {
+		reply.AuthorName = dn
+	}
+
 	reply.UserID = env.UserID
 	reply.ParentID = &req.ParentID
 	reply.Likes = 0
