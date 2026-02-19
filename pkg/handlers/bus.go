@@ -35,7 +35,7 @@ func (h *BusHandler) prepareStatements() {
 	h.stmtListSeats, err = h.db.Prepare(`
 		SELECT seat_number, user_id, reserved_at 
 		FROM bus_seats 
-		WHERE bus_id = $1 
+		WHERE trip_id = $1 
 		ORDER BY seat_number ASC
 	`)
 	if err != nil {
@@ -46,7 +46,7 @@ func (h *BusHandler) prepareStatements() {
 	h.stmtReserveSeat, err = h.db.Prepare(`
 		UPDATE bus_seats 
 		SET user_id = $1, reserved_at = NOW() 
-		WHERE bus_id = $2 AND seat_number = $3 AND user_id IS NULL
+		WHERE trip_id = $2 AND seat_number = $3 AND user_id IS NULL
 		RETURNING seat_number
 	`)
 	if err != nil {
@@ -54,7 +54,7 @@ func (h *BusHandler) prepareStatements() {
 	}
 
 	h.stmtMySeats, err = h.db.Prepare(`
-		SELECT bus_id, seat_number, reserved_at
+		SELECT trip_id, seat_number, reserved_at
 		FROM bus_seats
 		WHERE user_id = $1
 		ORDER BY reserved_at DESC
@@ -66,7 +66,7 @@ func (h *BusHandler) prepareStatements() {
 	h.stmtCancelSeat, err = h.db.Prepare(`
 		UPDATE bus_seats
 		SET user_id = NULL, reserved_at = NULL
-		WHERE bus_id = $1 AND seat_number = $2 AND user_id = $3
+		WHERE trip_id = $1 AND seat_number = $2 AND user_id = $3
 		RETURNING seat_number
 	`)
 	if err != nil {
@@ -125,7 +125,6 @@ func (h *BusHandler) Reserve(c *fiber.Ctx) error {
 	if !ok || userID <= 0 {
 		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
 	}
-
 	var req struct {
 		TripID     string `json:"trip_id"`
 		SeatNumber int    `json:"seat_number"`
@@ -138,7 +137,6 @@ func (h *BusHandler) Reserve(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "Missing Trip ID"})
 	}
 
-	// Atomic Update
 	var reservedSeat int
 	err := h.stmtReserveSeat.QueryRow(userID, req.TripID, req.SeatNumber).Scan(&reservedSeat)
 
