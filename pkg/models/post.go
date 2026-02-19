@@ -13,12 +13,12 @@ type Post struct {
 	UserID     int       `json:"user_id"`
 	ParentID   *int      `json:"parent_id,omitempty"`
 	Likes      int       `json:"likes"`
+	Liked      bool      `json:"liked"`
 	ReplyCount int       `json:"reply_count"`
 	CreatedAt  time.Time `json:"created_at"`
 	Replies    []Post    `json:"replies,omitempty"`
 }
 
-// ToProto converts to protobuf for internal serialization/caching
 func (p *Post) ToProto() *socialpb.Post {
 	pb := &socialpb.Post{
 		Id:         int32(p.ID),
@@ -38,7 +38,6 @@ func (p *Post) ToProto() *socialpb.Post {
 	return pb
 }
 
-// PostFromProto converts from protobuf back to model
 func PostFromProto(pb *socialpb.Post) Post {
 	p := Post{
 		ID:         int(pb.Id),

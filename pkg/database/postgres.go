@@ -23,6 +23,11 @@ func Connect() *sql.DB {
 		log.Fatal("Erro Ping Banco:", err)
 	}
 
+	// Configuração do Pool de Conexões
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * 60 * 1000000000) // 5 minutos
+
 	log.Println("Conexão com PostgreSQL estabelecida.")
 	return db
 }

@@ -219,6 +219,12 @@ func setupDatabase(db *sql.DB) {
 			author TEXT DEFAULT 'Anônimo',
 			categoria TEXT DEFAULT 'Geral'
 		)`,
+		`CREATE TABLE IF NOT EXISTS post_likes (
+			user_id INT NOT NULL,
+			post_id INT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (user_id, post_id)
+		)`,
 	}
 
 	for _, s := range schemas {
@@ -260,6 +266,8 @@ func setupDatabase(db *sql.DB) {
 		`CREATE INDEX IF NOT EXISTS idx_noticias_categoria ON noticias(categoria)`,
 		`CREATE INDEX IF NOT EXISTS idx_noticias_destaque ON noticias(destaque) WHERE destaque = true`,
 		`CREATE INDEX IF NOT EXISTS idx_noticias_tags ON noticias USING GIN(tags)`,
+		`CREATE INDEX IF NOT EXISTS idx_post_likes_user ON post_likes(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_post_likes_post ON post_likes(post_id)`,
 	}
 
 	for _, idx := range indexes {
