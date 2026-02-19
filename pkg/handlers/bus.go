@@ -1,13 +1,12 @@
 package handlers
 
 import (
+	"cacc/pkg/cache"
+	"cacc/pkg/models"
 	"database/sql"
 	"fmt"
 	"log"
-	"strconv"
 	"time"
-
-	"cacc/pkg/cache"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -16,7 +15,7 @@ type BusHandler struct {
 	db    *sql.DB
 	redis *cache.Redis
 
-	// Prepared statements for massive speed
+	// SQL Statements
 	stmtListSeats   *sql.Stmt
 	stmtReserveSeat *sql.Stmt
 	stmtMySeats     *sql.Stmt
@@ -43,8 +42,7 @@ func (h *BusHandler) prepareStatements() {
 		log.Fatalf("[BUS] FATAL: prepare list: %v", err)
 	}
 
-	// Reserva atômica: Só reserva se user_id for NULL (livre)
-	// Isso garante concorrência sem locks complexos: o banco serializa no nível da linha.
+	// Reserve only if user_id is NULL to ensure atomicity
 	h.stmtReserveSeat, err = h.db.Prepare(`
 		UPDATE bus_seats 
 		SET user_id = $1, reserved_at = NOW() 
@@ -76,53 +74,39 @@ func (h *BusHandler) prepareStatements() {
 	}
 }
 
-// Models
-type Seat struct {
-	Number     int        `json:"seat_number"`
-	IsReserved bool       `json:"is_reserved"`
-	UserID     *int       `json:"user_id,omitempty"` // Opcional, talvez só retornar se for o próprio usuário
-	ReservedAt *time.Time `json:"reserved_at,omitempty"`
-}
-
-// ──────────────────────────────────────────────
-// ENDPOINTS
-// ──────────────────────────────────────────────
-
-// GetSeats - Ultra fast cached list
 func (h *BusHandler) GetSeats(c *fiber.Ctx) error {
-	busID, _ := strconv.Atoi(c.Params("id"))
-	if busID <= 0 {
-		return c.Status(400).JSON(fiber.Map{"error": "Invalid Bus ID"})
+	tripID := c.Params("id")
+	if tripID == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid Trip ID"})
 	}
 
-	// 1. Try Cache First (Micro-caching 1s for high concurrency reads)
-	cacheKey := fmt.Sprintf("bus:%d:seats", busID)
-	var cachedSeats []Seat
+	cacheKey := fmt.Sprintf("bus:%s:seats", tripID)
+	var cachedSeats []models.BusSeat
 	if h.redis.Get(cacheKey, &cachedSeats) {
 		return c.JSON(cachedSeats)
 	}
 
-	// 2. DB Hit
-	rows, err := h.stmtListSeats.Query(busID)
+	rows, err := h.stmtListSeats.Query(tripID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "DB Error"})
 	}
 	defer rows.Close()
 
-	seats := []Seat{}
+	seats := []models.BusSeat{}
 	for rows.Next() {
-		var s Seat
+		var s models.BusSeat
 		var uid sql.NullInt64
 		var rat sql.NullTime
 
-		if err := rows.Scan(&s.Number, &uid, &rat); err != nil {
+		if err := rows.Scan(&s.SeatNumber, &uid, &rat); err != nil {
 			continue
 		}
 
+		s.TripID = tripID
 		if uid.Valid {
 			s.IsReserved = true
 			id := int(uid.Int64)
-			s.UserID = &id // In production, maybe hide this from other users
+			s.UserID = &id
 			if rat.Valid {
 				t := rat.Time
 				s.ReservedAt = &t
@@ -131,35 +115,34 @@ func (h *BusHandler) GetSeats(c *fiber.Ctx) error {
 		seats = append(seats, s)
 	}
 
-	// 3. Set Cache (Short TTL to reflect updates quickly but protect DB from storms)
-	h.redis.Set(cacheKey, seats, 1*time.Second)
+	h.redis.Set(cacheKey, seats, 1*time.Second) // 1s micro-cache
 
 	return c.JSON(seats)
 }
 
-// Reserve - Atomic & Thread-safe
 func (h *BusHandler) Reserve(c *fiber.Ctx) error {
-	// Pega UserID do token JWT injetado pelo middleware
 	userID, ok := c.Locals("user_id").(int)
 	if !ok || userID <= 0 {
 		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
 	}
 
 	var req struct {
-		BusID      int `json:"bus_id"`
-		SeatNumber int `json:"seat_number"`
+		TripID     string `json:"trip_id"`
+		SeatNumber int    `json:"seat_number"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid Body"})
 	}
 
+	if req.TripID == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "Missing Trip ID"})
+	}
+
 	// Atomic Update
 	var reservedSeat int
-	err := h.stmtReserveSeat.QueryRow(userID, req.BusID, req.SeatNumber).Scan(&reservedSeat)
+	err := h.stmtReserveSeat.QueryRow(userID, req.TripID, req.SeatNumber).Scan(&reservedSeat)
 
 	if err == sql.ErrNoRows {
-		// Se não retornou linha, é porque o WHERE falhou (user_id IS NOT NULL)
-		// Ou seja, já estava reservado. Race condition handled by DB.
 		return c.Status(409).JSON(fiber.Map{"error": "Seat already reserved"})
 	}
 	if err != nil {
@@ -167,11 +150,7 @@ func (h *BusHandler) Reserve(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "Reservation Failed"})
 	}
 
-	// Invalidate Cache Immediately
-	h.redis.Del(fmt.Sprintf("bus:%d:seats", req.BusID))
-
-	// Broadcast update via WebSocket (optional, but requested "speed/realtime")
-	// h.hub.Broadcast("seat_reserved", "bus", map[string]int{"bus": req.BusID, "seat": reservedSeat})
+	h.redis.Del(fmt.Sprintf("bus:%s:seats", req.TripID))
 
 	return c.JSON(fiber.Map{"status": "reserved", "seat": reservedSeat})
 }
@@ -188,16 +167,10 @@ func (h *BusHandler) MyReservations(c *fiber.Ctx) error {
 	}
 	defer rows.Close()
 
-	type MySeat struct {
-		BusID      int       `json:"bus_id"`
-		SeatNumber int       `json:"seat_number"`
-		ReservedAt time.Time `json:"reserved_at"`
-	}
-
-	list := []MySeat{}
+	list := []models.MyReservation{}
 	for rows.Next() {
-		var s MySeat
-		rows.Scan(&s.BusID, &s.SeatNumber, &s.ReservedAt)
+		var s models.MyReservation
+		rows.Scan(&s.TripID, &s.SeatNumber, &s.ReservedAt)
 		list = append(list, s)
 	}
 
@@ -210,22 +183,18 @@ func (h *BusHandler) Cancel(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
 	}
 
-	var req struct {
-		BusID      int `json:"bus_id"`
-		SeatNumber int `json:"seat_number"`
-	}
+	var req models.TripRequest
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid Body"})
 	}
 
 	var seat int
-	err := h.stmtCancelSeat.QueryRow(req.BusID, req.SeatNumber, userID).Scan(&seat)
+	err := h.stmtCancelSeat.QueryRow(req.TripID, req.SeatNumber, userID).Scan(&seat)
 	if err == sql.ErrNoRows {
 		return c.Status(404).JSON(fiber.Map{"error": "Reservation not found or not yours"})
 	}
 
-	// Invalidate Cache
-	h.redis.Del(fmt.Sprintf("bus:%d:seats", req.BusID))
+	h.redis.Del(fmt.Sprintf("bus:%s:seats", req.TripID))
 
 	return c.JSON(fiber.Map{"status": "cancelled", "seat": seat})
 }

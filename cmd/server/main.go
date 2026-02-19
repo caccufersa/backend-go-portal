@@ -24,7 +24,6 @@ func main() {
 	db := database.Connect()
 	defer db.Close()
 
-	// Serverless PG: keep pool small, connections short-lived
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(3 * time.Minute)
@@ -243,11 +242,11 @@ func setupDatabase(db *sql.DB) {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS bus_seats (
-			bus_id INT NOT NULL,
+			trip_id TEXT NOT NULL,
 			seat_number INT NOT NULL,
 			user_id INT REFERENCES users(id) ON DELETE SET NULL,
 			reserved_at TIMESTAMP,
-			PRIMARY KEY (bus_id, seat_number)
+			PRIMARY KEY (trip_id, seat_number)
 		)`,
 	}
 
@@ -260,15 +259,16 @@ func setupDatabase(db *sql.DB) {
 		`UPDATE users SET uuid = gen_random_uuid() WHERE uuid IS NULL`,
 		`ALTER TABLE posts ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL`,
 		`ALTER TABLE posts ADD COLUMN IF NOT EXISTS reply_count INT NOT NULL DEFAULT 0`,
-		// Backfill reply_count for existing data
 		`UPDATE posts p SET reply_count = (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id) WHERE reply_count = 0`,
 		`ALTER TABLE noticias ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}'`,
 		`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT`,
 		`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS categoria TEXT DEFAULT 'Geral'`,
-		// Populate bus 1 with 40 seats if empty
-		`INSERT INTO bus_seats (bus_id, seat_number) 
-		 SELECT 1, generate_series(1, 40)
-		 WHERE NOT EXISTS (SELECT 1 FROM bus_seats WHERE bus_id = 1)`,
+		`INSERT INTO bus_seats (trip_id, seat_number) 
+		 SELECT 't1', generate_series(1, 36)
+		 WHERE NOT EXISTS (SELECT 1 FROM bus_seats WHERE trip_id = 't1')`,
+		`INSERT INTO bus_seats (trip_id, seat_number) 
+		 SELECT 't2', generate_series(1, 44)
+		 WHERE NOT EXISTS (SELECT 1 FROM bus_seats WHERE trip_id = 't2')`,
 	}
 
 	for _, a := range alterations {
