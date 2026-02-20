@@ -38,3 +38,18 @@ func AuthMiddleware(c *fiber.Ctx) error {
 
 	return c.Next()
 }
+
+func AdminMiddleware(c *fiber.Ctx) error {
+	adminKey := c.Get("X-Admin-Key")
+	expectedKey := os.Getenv("ADMIN_SECRET_KEY")
+
+	if expectedKey == "" {
+		expectedKey = "dev-admin-secret"
+	}
+
+	if adminKey != expectedKey {
+		return c.Status(403).JSON(fiber.Map{"erro": "Acesso negado: Chave administrativa secreta inválida"})
+	}
+
+	return c.Next()
+}

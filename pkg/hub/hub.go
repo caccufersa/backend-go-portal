@@ -67,6 +67,9 @@ func (h *Hub) HandleClientConn(c *websocket.Conn, userID int, uuid, username str
 	h.mu.Unlock()
 
 	log.Printf("[HUB] Client connected: user_id=%d username=%s total=%d", userID, username, h.ClientCount())
+	h.Broadcast("userCount", "system", map[string]int{
+		"count": h.ClientCount(),
+	})
 
 	defer func() {
 		h.mu.Lock()
@@ -86,6 +89,9 @@ func (h *Hub) HandleClientConn(c *websocket.Conn, userID int, uuid, username str
 		h.mu.Unlock()
 		c.Close()
 		log.Printf("[HUB] Client disconnected: user_id=%d username=%s total=%d", userID, username, h.ClientCount())
+		h.Broadcast("userCount", "system", map[string]int{
+			"count": h.ClientCount(),
+		})
 	}()
 
 	for {

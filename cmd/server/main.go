@@ -107,25 +107,37 @@ func main() {
 
 	app.Get("/internal/user/:uuid", auth.GetUserByUUID)
 
-	// ── Notícias REST (public read, private write) ──
+	// ── Notícias REST (public read, admin write) ──
 	noticiasGroup := app.Group("/noticias")
 	noticiasGroup.Get("/destaques", noticias.Destaques)
 	noticiasGroup.Get("/:id", noticias.BuscarPorID)
 	noticiasGroup.Get("/", noticias.Listar)
-	noticiasPriv := noticiasGroup.Group("", middleware.AuthMiddleware)
-	noticiasPriv.Post("/", noticias.Criar)
-	noticiasPriv.Put("/:id", noticias.Atualizar)
-	noticiasPriv.Delete("/:id", noticias.Deletar)
 
-	// ── Sugestões REST (public read, auth write) ──
+	noticiasAdmin := noticiasGroup.Group("", middleware.AuthMiddleware, middleware.AdminMiddleware)
+	noticiasAdmin.Post("/", noticias.Criar)
+	noticiasAdmin.Put("/:id", noticias.Atualizar)
+	noticiasAdmin.Delete("/:id", noticias.Deletar)
+
+	// ── Sugestões REST (public read, auth write, admin edit/delete) ──
 	sugestoesGroup := app.Group("/sugestoes")
 	sugestoesGroup.Get("/", sugestoes.Listar)
+
 	sugestoesPriv := sugestoesGroup.Group("", middleware.AuthMiddleware)
 	sugestoesPriv.Post("/", sugestoes.Criar)
 
+	sugestoesAdmin := sugestoesGroup.Group("", middleware.AuthMiddleware, middleware.AdminMiddleware)
+	sugestoesAdmin.Delete("/:id", sugestoes.Deletar) // Admin can delete
+	sugestoesAdmin.Put("/:id", sugestoes.Atualizar)  // Admin can update
+
 	// ── Bus Reserva (High Performance) ──
 	busGroup := app.Group("/bus")
+	busGroup.Get("/trips", bus.ListTrips)    // New: public trips listing
 	busGroup.Get("/:id/seats", bus.GetSeats) // Public read (fast)
+
+	busAdmin := busGroup.Group("/trips", middleware.AuthMiddleware, middleware.AdminMiddleware)
+	busAdmin.Post("/", bus.CreateTrip)      // Admin can create a trip
+	busAdmin.Put("/:id", bus.UpdateTrip)    // Admin can update a trip
+	busAdmin.Delete("/:id", bus.DeleteTrip) // Admin can delete a trip
 
 	busPriv := busGroup.Group("", middleware.AuthMiddleware)
 	busPriv.Post("/reserve", bus.Reserve)

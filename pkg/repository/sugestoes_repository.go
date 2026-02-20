@@ -8,6 +8,8 @@ import (
 type SugestoesRepository interface {
 	Listar() ([]models.Sugestao, error)
 	Criar(texto, author, categoria string) (models.Sugestao, error)
+	Deletar(id int) error
+	Atualizar(id int, texto, categoria string) error
 }
 
 type sugestoesRepository struct {
@@ -54,4 +56,13 @@ func (r *sugestoesRepository) Criar(texto, author, categoria string) (models.Sug
 	s.Author = author
 	s.Categoria = categoria
 	return s, nil
+}
+func (r *sugestoesRepository) Deletar(id int) error {
+	_, err := r.db.Exec(`DELETE FROM sugestoes WHERE id = $1`, id)
+	return err
+}
+
+func (r *sugestoesRepository) Atualizar(id int, texto, categoria string) error {
+	_, err := r.db.Exec(`UPDATE sugestoes SET texto = $1, categoria = $2 WHERE id = $3`, texto, categoria, id)
+	return err
 }

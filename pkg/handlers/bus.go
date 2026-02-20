@@ -17,6 +17,65 @@ func NewBus(service services.BusService) *BusHandler {
 	return &BusHandler{service: service}
 }
 
+// ── TRIPS ADMINISTRATION ──
+
+func (h *BusHandler) ListTrips(c *fiber.Ctx) error {
+	trips, err := h.service.ListTrips()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao listar viagens"})
+	}
+	if trips == nil {
+		trips = []models.BusTrip{}
+	}
+	return c.JSON(trips)
+}
+
+func (h *BusHandler) CreateTrip(c *fiber.Ctx) error {
+	var req models.TripCreateRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"erro": "JSON Invalido"})
+	}
+
+	trip, err := h.service.CreateTrip(req)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"erro": err.Error()})
+	}
+	return c.Status(201).JSON(trip)
+}
+
+func (h *BusHandler) UpdateTrip(c *fiber.Ctx) error {
+	id := c.Params("id")
+	if id == "" {
+		return c.Status(400).JSON(fiber.Map{"erro": "id required"})
+	}
+
+	var req models.TripUpdateRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"erro": "JSON Invalido"})
+	}
+
+	err := h.service.UpdateTrip(id, req)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao atualizar"})
+	}
+	return c.JSON(fiber.Map{"status": "updated"})
+}
+
+func (h *BusHandler) DeleteTrip(c *fiber.Ctx) error {
+	id := c.Params("id")
+	if id == "" {
+		return c.Status(400).JSON(fiber.Map{"erro": "id required"})
+	}
+
+	err := h.service.DeleteTrip(id)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao deletar"})
+	}
+	return c.JSON(fiber.Map{"status": "deleted"})
+}
+
+// ── SEAT RESERVATIONS ──
+
 func (h *BusHandler) GetSeats(c *fiber.Ctx) error {
 	tripID := c.Params("id")
 	if tripID == "" {
@@ -51,7 +110,7 @@ func (h *BusHandler) Reserve(c *fiber.Ctx) error {
 
 	reservedSeat, err := h.service.Reserve(userID, req.TripID, req.SeatNumber)
 	if err == sql.ErrNoRows {
-		return c.Status(409).JSON(fiber.Map{"error": "Seat already reserved"})
+		return c.Status(409).JSON(fiber.Map{"error": "Seat already reserved or Trip Completed/Not Found."})
 	}
 	if err != nil {
 		log.Printf("[BUS] Error reserving: %v", err)

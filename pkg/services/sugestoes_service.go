@@ -10,6 +10,8 @@ import (
 type SugestoesService interface {
 	Listar() ([]models.Sugestao, error)
 	Criar(texto, author, categoria string) (models.Sugestao, error)
+	Deletar(id int) error
+	Atualizar(id int, texto, categoria string) error
 }
 
 type sugestoesService struct {
@@ -42,4 +44,20 @@ func (s *sugestoesService) Criar(texto, author, categoria string) (models.Sugest
 		s.redis.Del("sugestoes:all")
 	}
 	return sugestao, err
+}
+
+func (s *sugestoesService) Deletar(id int) error {
+	err := s.repo.Deletar(id)
+	if err == nil {
+		s.redis.Del("sugestoes:all")
+	}
+	return err
+}
+
+func (s *sugestoesService) Atualizar(id int, texto, categoria string) error {
+	err := s.repo.Atualizar(id, texto, categoria)
+	if err == nil {
+		s.redis.Del("sugestoes:all")
+	}
+	return err
 }
