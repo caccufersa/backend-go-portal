@@ -9,15 +9,19 @@ import (
 
 	"cacc/pkg/cache"
 	"cacc/pkg/database"
+	"cacc/pkg/database/migrations"
 	"cacc/pkg/handlers"
 	"cacc/pkg/hub"
 	"cacc/pkg/middleware"
+	"cacc/pkg/repository"
 	"cacc/pkg/server"
+	"cacc/pkg/services"
 
 	"github.com/gofiber/contrib/websocket"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/pressly/goose/v3"
 )
 
 func main() {
@@ -29,7 +33,14 @@ func main() {
 	db.SetConnMaxLifetime(3 * time.Minute)
 	db.SetConnMaxIdleTime(30 * time.Second)
 
-	setupDatabase(db)
+	goose.SetBaseFS(migrations.FS)
+	if err := goose.SetDialect("postgres"); err != nil {
+		log.Fatalf("[DB] goose dialect err: %v", err)
+	}
+	if err := goose.Up(db, "."); err != nil {
+		log.Fatalf("[DB] migrations failed: %v", err)
+	}
+	log.Println("[DB] Schema migrations applied")
 	go cleanExpiredSessions(db)
 
 	log.Println("[PORTAL] Connecting to Redis...")
@@ -39,13 +50,25 @@ func main() {
 
 	wsHub := hub.New()
 
-	auth := handlers.NewAuth(db, wsHub, redis)
-	social := handlers.NewSocial(db, wsHub, redis)
-	noticias := handlers.NewNoticias(db, redis)
-	sugestoes := handlers.NewSugestoes(db, redis)
-	bus := handlers.NewBus(db, redis)
+	authRepo := repository.NewAuthRepository(db)
+	authService := services.NewAuthService(authRepo)
+	auth := handlers.NewAuth(wsHub, authService)
 
-	social.RegisterActions()
+	socialRepo := repository.NewSocialRepository(db)
+	socialService := services.NewSocialService(socialRepo, authRepo, redis)
+	_ = handlers.NewSocial(wsHub, socialService)
+
+	noticiasRepo := repository.NewNoticiasRepository(db)
+	noticiasService := services.NewNoticiasService(noticiasRepo, redis)
+	noticias := handlers.NewNoticias(noticiasService)
+
+	sugestaoRepo := repository.NewSugestoesRepository(db)
+	sugestaoService := services.NewSugestoesService(sugestaoRepo, redis)
+	sugestoes := handlers.NewSugestoes(sugestaoService)
+
+	busRepo := repository.NewBusRepository(db)
+	busService := services.NewBusService(busRepo, redis)
+	bus := handlers.NewBus(busService)
 
 	app := server.NewApp("portal")
 
@@ -177,132 +200,6 @@ func parseWSToken(c *fiber.Ctx) error {
 	c.Locals("user_uuid", userUUID)
 	c.Locals("username", username)
 	return c.Next()
-}
-
-func setupDatabase(db *sql.DB) {
-	db.Exec(`CREATE EXTENSION IF NOT EXISTS "pgcrypto"`)
-
-	schemas := []string{
-		`CREATE TABLE IF NOT EXISTS users (
-			id SERIAL PRIMARY KEY,
-			uuid UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
-			username TEXT UNIQUE NOT NULL,
-			password TEXT NOT NULL,
-			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS sessions (
-			id SERIAL PRIMARY KEY,
-			user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-			refresh_token TEXT UNIQUE NOT NULL,
-			user_agent TEXT NOT NULL DEFAULT '',
-			ip TEXT NOT NULL DEFAULT '',
-			expires_at TIMESTAMP NOT NULL,
-			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS posts (
-			id SERIAL PRIMARY KEY,
-			texto TEXT NOT NULL,
-			author TEXT NOT NULL DEFAULT 'Anônimo',
-			user_id INT REFERENCES users(id) ON DELETE SET NULL,
-			parent_id INT REFERENCES posts(id) ON DELETE CASCADE,
-			likes INT NOT NULL DEFAULT 0,
-			reply_count INT NOT NULL DEFAULT 0,
-			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS noticias (
-			id SERIAL PRIMARY KEY,
-			titulo TEXT NOT NULL,
-			conteudo TEXT NOT NULL,
-			resumo TEXT NOT NULL DEFAULT '',
-			author TEXT NOT NULL DEFAULT 'Anônimo',
-			categoria TEXT NOT NULL DEFAULT 'Geral',
-			image_url TEXT,
-			destaque BOOLEAN NOT NULL DEFAULT false,
-			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS sugestoes (
-			id SERIAL PRIMARY KEY,
-			texto TEXT NOT NULL,
-			data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			author TEXT DEFAULT 'Anônimo',
-			categoria TEXT DEFAULT 'Geral'
-		)`,
-		`CREATE TABLE IF NOT EXISTS post_likes (
-			user_id INT NOT NULL,
-			post_id INT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (user_id, post_id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS social_profiles (
-			user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-			display_name TEXT,
-			bio TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS bus_seats (
-			trip_id TEXT NOT NULL,
-			seat_number INT NOT NULL,
-			user_id INT REFERENCES users(id) ON DELETE SET NULL,
-			reserved_at TIMESTAMP,
-			PRIMARY KEY (trip_id, seat_number)
-		)`,
-	}
-
-	for _, s := range schemas {
-		db.Exec(s)
-	}
-
-	alterations := []string{
-		`ALTER TABLE users ADD COLUMN IF NOT EXISTS uuid UUID UNIQUE DEFAULT gen_random_uuid()`,
-		`UPDATE users SET uuid = gen_random_uuid() WHERE uuid IS NULL`,
-		`ALTER TABLE posts ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL`,
-		`ALTER TABLE posts ADD COLUMN IF NOT EXISTS reply_count INT NOT NULL DEFAULT 0`,
-		`UPDATE posts p SET reply_count = (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id) WHERE reply_count = 0`,
-		`ALTER TABLE noticias ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}'`,
-		`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT`,
-		`ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS categoria TEXT DEFAULT 'Geral'`,
-		`INSERT INTO bus_seats (trip_id, seat_number) 
-		 SELECT 't1', generate_series(1, 36)
-		 WHERE NOT EXISTS (SELECT 1 FROM bus_seats WHERE trip_id = 't1')`,
-		`INSERT INTO bus_seats (trip_id, seat_number) 
-		 SELECT 't2', generate_series(1, 44)
-		 WHERE NOT EXISTS (SELECT 1 FROM bus_seats WHERE trip_id = 't2')`,
-	}
-
-	for _, a := range alterations {
-		db.Exec(a)
-	}
-
-	indexes := []string{
-		`CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)`,
-		`CREATE INDEX IF NOT EXISTS idx_users_uuid ON users(uuid)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(refresh_token)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_posts_parent ON posts(parent_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_posts_likes ON posts(likes DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author)`,
-		`CREATE INDEX IF NOT EXISTS idx_posts_user_id ON posts(user_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_posts_feed ON posts(created_at DESC) WHERE parent_id IS NULL`,
-		`CREATE INDEX IF NOT EXISTS idx_posts_user_created ON posts(user_id, created_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_posts_parent_created ON posts(parent_id, created_at ASC)`,
-		`CREATE INDEX IF NOT EXISTS idx_posts_reply_count ON posts(reply_count) WHERE reply_count > 0`,
-		`CREATE INDEX IF NOT EXISTS idx_noticias_created ON noticias(created_at DESC)`,
-		`CREATE INDEX IF NOT EXISTS idx_noticias_categoria ON noticias(categoria)`,
-		`CREATE INDEX IF NOT EXISTS idx_noticias_destaque ON noticias(destaque) WHERE destaque = true`,
-		`CREATE INDEX IF NOT EXISTS idx_noticias_tags ON noticias USING GIN(tags)`,
-		`CREATE INDEX IF NOT EXISTS idx_post_likes_user ON post_likes(user_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_post_likes_post ON post_likes(post_id)`,
-	}
-
-	for _, idx := range indexes {
-		db.Exec(idx)
-	}
-
-	log.Println("[DB] Schema initialized")
 }
 
 func cleanExpiredSessions(db *sql.DB) {

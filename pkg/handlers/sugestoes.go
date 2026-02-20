@@ -1,65 +1,27 @@
 package handlers
 
 import (
-	"database/sql"
+	"cacc/pkg/services"
 	"strings"
-	"time"
-
-	"cacc/pkg/cache"
-	"cacc/pkg/models"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 type SugestoesHandler struct {
-	db    *sql.DB
-	redis *cache.Redis
-
-	stmtList   *sql.Stmt
-	stmtInsert *sql.Stmt
+	service services.SugestoesService
 }
 
-func NewSugestoes(db *sql.DB, r *cache.Redis) *SugestoesHandler {
-	sg := &SugestoesHandler{db: db, redis: r}
-	sg.prepare()
-	return sg
-}
-
-func (sg *SugestoesHandler) prepare() {
-	sg.stmtList, _ = sg.db.Prepare(`
-		SELECT id, texto, data_criacao, COALESCE(author, 'Anônimo'), COALESCE(categoria, 'Geral')
-		FROM sugestoes ORDER BY id DESC LIMIT 200
-	`)
-	sg.stmtInsert, _ = sg.db.Prepare(`
-		INSERT INTO sugestoes (texto, author, categoria)
-		VALUES ($1, $2, $3)
-		RETURNING id, data_criacao
-	`)
+func NewSugestoes(service services.SugestoesService) *SugestoesHandler {
+	return &SugestoesHandler{service: service}
 }
 
 // GET /sugestoes
 func (sg *SugestoesHandler) Listar(c *fiber.Ctx) error {
-	var cached []models.Sugestao
-	if sg.redis.Get("sugestoes:all", &cached) {
-		return c.JSON(cached)
-	}
-
-	rows, err := sg.stmtList.Query()
+	lista, err := sg.service.Listar()
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"erro": "Erro no banco"})
-	}
-	defer rows.Close()
-
-	lista := []models.Sugestao{}
-	for rows.Next() {
-		var s models.Sugestao
-		if err := rows.Scan(&s.ID, &s.Texto, &s.CreatedAt, &s.Author, &s.Categoria); err != nil {
-			continue
-		}
-		lista = append(lista, s)
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao buscar sugestões"})
 	}
 
-	sg.redis.Set("sugestoes:all", lista, 30*time.Second)
 	return c.JSON(lista)
 }
 
@@ -91,16 +53,10 @@ func (sg *SugestoesHandler) Criar(c *fiber.Ctx) error {
 		categoria = "Geral"
 	}
 
-	var s models.Sugestao
-	err := sg.stmtInsert.QueryRow(texto, username, categoria).Scan(&s.ID, &s.CreatedAt)
+	sugestao, err := sg.service.Criar(texto, username, categoria)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao salvar"})
 	}
 
-	s.Texto = texto
-	s.Author = username
-	s.Categoria = categoria
-
-	sg.redis.Del("sugestoes:all")
-	return c.Status(201).JSON(s)
+	return c.Status(201).JSON(sugestao)
 }
