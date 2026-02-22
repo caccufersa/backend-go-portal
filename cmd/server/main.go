@@ -9,7 +9,6 @@ import (
 
 	"cacc/pkg/cache"
 	"cacc/pkg/database"
-	"cacc/pkg/database/migrations"
 	"cacc/pkg/handlers"
 	"cacc/pkg/hub"
 	"cacc/pkg/middleware"
@@ -21,7 +20,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/pressly/goose/v3"
 )
 
 func main() {
@@ -33,14 +31,6 @@ func main() {
 	db.SetConnMaxLifetime(3 * time.Minute)
 	db.SetConnMaxIdleTime(30 * time.Second)
 
-	goose.SetBaseFS(migrations.FS)
-	if err := goose.SetDialect("postgres"); err != nil {
-		log.Fatalf("[DB] goose dialect err: %v", err)
-	}
-	if err := goose.Up(db, "."); err != nil {
-		log.Fatalf("[DB] migrations failed: %v", err)
-	}
-	log.Println("[DB] Schema migrations applied")
 	go cleanExpiredSessions(db)
 
 	log.Println("[PORTAL] Connecting to Redis...")
