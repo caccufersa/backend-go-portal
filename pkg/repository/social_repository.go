@@ -37,10 +37,10 @@ func NewSocialRepository(db *sql.DB) SocialRepository {
 
 func (r *socialRepository) Feed(userID, limit, offset int) ([]models.Post, error) {
 	rows, err := r.db.Query(`
-		SELECT p.id, p.texto, u.username, COALESCE(sp.display_name, u.username), p.user_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(p.user_id, 0), p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $3) AS liked
 		FROM posts p
-		JOIN users u ON p.user_id = u.id
+		LEFT JOIN users u ON p.user_id = u.id
 		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
 		WHERE p.parent_id IS NULL
 		ORDER BY p.created_at DESC
@@ -65,10 +65,10 @@ func (r *socialRepository) Feed(userID, limit, offset int) ([]models.Post, error
 func (r *socialRepository) Thread(postID, userID int) (models.Post, error) {
 	var p models.Post
 	err := r.db.QueryRow(`
-		SELECT p.id, p.texto, u.username, COALESCE(sp.display_name, u.username), p.user_id, p.parent_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(p.user_id, 0), p.parent_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $2) AS liked
 		FROM posts p
-		JOIN users u ON p.user_id = u.id
+		LEFT JOIN users u ON p.user_id = u.id
 		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
 		WHERE p.id = $1
 	`, postID, userID).Scan(
@@ -79,10 +79,10 @@ func (r *socialRepository) Thread(postID, userID int) (models.Post, error) {
 
 func (r *socialRepository) Replies(parentID, userID, limit int) ([]models.Post, error) {
 	rows, err := r.db.Query(`
-		SELECT p.id, p.texto, u.username, COALESCE(sp.display_name, u.username), p.user_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(p.user_id, 0), p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $2) AS liked
 		FROM posts p
-		JOIN users u ON p.user_id = u.id
+		LEFT JOIN users u ON p.user_id = u.id
 		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
 		WHERE p.parent_id = $1
 		ORDER BY p.created_at ASC
@@ -105,10 +105,10 @@ func (r *socialRepository) Replies(parentID, userID, limit int) ([]models.Post, 
 
 func (r *socialRepository) ProfilePosts(profileUserID, requestingUserID, limit int) ([]models.Post, error) {
 	rows, err := r.db.Query(`
-		SELECT p.id, p.texto, u.username, COALESCE(sp.display_name, u.username), p.user_id, p.parent_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(p.user_id, 0), p.parent_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $2) AS liked
 		FROM posts p
-		JOIN users u ON p.user_id = u.id
+		LEFT JOIN users u ON p.user_id = u.id
 		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
 		WHERE p.user_id = $1
 		ORDER BY p.created_at DESC
@@ -262,10 +262,10 @@ func (r *socialRepository) BatchLoadReplies(parentIDs []int, userID int) (map[in
 	}
 
 	query := fmt.Sprintf(`
-		SELECT p.id, p.texto, u.username, COALESCE(sp.display_name, u.username), p.user_id, p.parent_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(p.user_id, 0), p.parent_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $1) AS liked
 		FROM posts p
-		JOIN users u ON p.user_id = u.id
+		LEFT JOIN users u ON p.user_id = u.id
 		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
 		WHERE p.parent_id IN (%s)
 		ORDER BY p.created_at ASC
