@@ -46,7 +46,7 @@ func main() {
 
 	socialRepo := repository.NewSocialRepository(db)
 	socialService := services.NewSocialService(socialRepo, authRepo, redis)
-	_ = handlers.NewSocial(wsHub, socialService)
+	social := handlers.NewSocial(wsHub, socialService)
 
 	noticiasRepo := repository.NewNoticiasRepository(db)
 	noticiasService := services.NewNoticiasService(noticiasRepo, redis)
@@ -111,6 +111,20 @@ func main() {
 	// ── Sugestões REST (public read, auth write, admin edit/delete) ──
 	sugestoesGroup := app.Group("/sugestoes")
 	sugestoesGroup.Get("/", sugestoes.Listar)
+
+	// ── Social (Feed, Threads, Profiles) ──
+	socialGroup := app.Group("/social")
+	socialGroup.Get("/feed", social.Feed)
+	socialGroup.Get("/feed/:id", social.Thread)
+	socialGroup.Get("/profile/:username?", social.Profile)
+
+	socialPriv := socialGroup.Group("", middleware.AuthMiddleware)
+	socialPriv.Put("/profile", social.UpdateProfile)
+	socialPriv.Post("/feed", social.CreatePost)
+	socialPriv.Post("/feed/:id/reply", social.CreateReply)
+	socialPriv.Put("/feed/:id/like", social.LikePost)
+	socialPriv.Delete("/feed/:id/like", social.UnlikePost)
+	socialPriv.Delete("/feed/:id", social.DeletePost)
 
 	sugestoesPriv := sugestoesGroup.Group("", middleware.AuthMiddleware)
 	sugestoesPriv.Post("/", sugestoes.Criar)
