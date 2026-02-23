@@ -77,6 +77,22 @@ func (ah *AuthHandler) Login(c *fiber.Ctx) error {
 	return c.Status(200).JSON(res)
 }
 
+func (ah *AuthHandler) ResetPassword(c *fiber.Ctx) error {
+	var req models.ResetPasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
+	}
+
+	if err := ah.service.ResetPassword(req); err != nil {
+		if err.Error() == "todos os campos são obrigatórios" || err.Error() == "senha deve ter ao menos 8 caracteres" || err.Error() == "código de recuperação inválido" || err.Error() == "dados inválidos" {
+			return c.Status(400).JSON(fiber.Map{"erro": err.Error()})
+		}
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro interno"})
+	}
+
+	return c.JSON(fiber.Map{"message": "Senha redefinida com sucesso. Faça login novamente."})
+}
+
 func (ah *AuthHandler) Refresh(c *fiber.Ctx) error {
 	var req struct {
 		RefreshToken string `json:"refresh_token"`

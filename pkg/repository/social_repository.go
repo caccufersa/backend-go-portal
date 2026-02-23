@@ -106,7 +106,7 @@ func (r *socialRepository) Replies(parentID, userID, limit int) ([]models.Post, 
 
 func (r *socialRepository) ProfilePosts(profileUserID, requestingUserID, limit int) ([]models.Post, error) {
 	rows, err := r.db.Query(`
-		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(p.user_id, 0), p.parent_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(sp.avatar_url, ''), COALESCE(p.user_id, 0), p.parent_id, p.repost_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $2) AS liked
 		FROM posts p
 		LEFT JOIN users u ON p.user_id = u.id

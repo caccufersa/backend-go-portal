@@ -15,6 +15,9 @@ type BusRepository interface {
 	ReserveSeat(userID int, tripID string, seatNumber int) (int, error)
 	MyReservations(userID int) ([]models.MyReservation, error)
 	CancelSeat(userID int, tripID string, seatNumber int) (int, error)
+
+	SetUserContact(userID int, phone int64) error
+	GetUserContact(userID int) (int64, error)
 }
 
 type busRepository struct {
@@ -215,4 +218,23 @@ func (r *busRepository) CancelSeat(userID int, tripID string, seatNumber int) (i
 		RETURNING seat_number
 	`, tripID, seatNumber, userID).Scan(&seat)
 	return seat, err
+}
+
+func (r *busRepository) SetUserContact(userID int, phone int64) error {
+	_, err := r.db.Exec(`
+		INSERT INTO bus_profiles (user_id, phone, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (user_id) DO UPDATE 
+		SET phone = EXCLUDED.phone, updated_at = NOW()
+	`, userID, phone)
+	return err
+}
+
+func (r *busRepository) GetUserContact(userID int) (int64, error) {
+	var phone int64
+	err := r.db.QueryRow(`SELECT phone FROM bus_profiles WHERE user_id = $1`, userID).Scan(&phone)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return phone, err
 }

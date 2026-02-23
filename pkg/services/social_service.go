@@ -171,8 +171,12 @@ func (s *socialService) Profile(username string, profileUserID, requestingUserID
 func (s *socialService) UpdateProfile(userID int, displayName, bio, avatarURL string) error {
 	err := s.repo.UpdateProfile(userID, displayName, bio, avatarURL)
 	if err == nil {
-		s.redis.Del(fmt.Sprintf("social:profile:%d", userID))
+		// Profile cache keys include the requesting user ID suffix (social:profile:{id}:lid{X})
+		// so we need DelPattern to evict all cached variants for this user
+		s.redis.DelPattern(fmt.Sprintf("social:profile:%d:*", userID))
+		// Also evict feed and thread caches since avatar/displayName appears in posts
 		s.redis.DelPattern("social:feed:*")
+		s.redis.DelPattern("social:thread:*")
 	}
 	return err
 }

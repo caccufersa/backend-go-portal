@@ -8,10 +8,11 @@ import (
 )
 
 type AuthRepository interface {
-	CreateUser(username, hashedPassword string) (models.User, error)
+	CreateUser(username, hashedPassword, recoveryKey string) (models.User, error)
 	GetUserByUsername(username string) (models.User, string, error)
 	GetUserByID(id int) (models.User, error)
 	GetUserByUUID(uuid string) (models.User, error)
+	UpdatePassword(userID int, newHashedPassword string) error
 	CreateSession(userID int, refreshToken, userAgent, ip string, expiresAt time.Time) error
 	GetSessionByToken(token string) (models.Session, models.User, error)
 	UpdateSession(sessionID int, newRefresh string, expiresAt time.Time) error
@@ -29,24 +30,33 @@ func NewAuthRepository(db *sql.DB) AuthRepository {
 	return &authRepository{db: db}
 }
 
-func (r *authRepository) CreateUser(username, hashedPassword string) (models.User, error) {
+func (r *authRepository) CreateUser(username, hashedPassword, recoveryKey string) (models.User, error) {
 	var user models.User
 	err := r.db.QueryRow(
-		`INSERT INTO users (username, password) VALUES ($1, $2)
-		 RETURNING id, uuid, username, created_at`,
-		strings.ToLower(username), hashedPassword,
-	).Scan(&user.ID, &user.UUID, &user.Username, &user.CreatedAt)
+		`INSERT INTO users (username, password, recovery_key) VALUES ($1, $2, $3)
+		 RETURNING id, uuid, username, recovery_key, created_at`,
+		strings.ToLower(username), hashedPassword, recoveryKey,
+	).Scan(&user.ID, &user.UUID, &user.Username, &user.RecoveryKey, &user.CreatedAt)
 	return user, err
 }
 
 func (r *authRepository) GetUserByUsername(username string) (models.User, string, error) {
 	var user models.User
 	var hashedPw string
+	var recKey sql.NullString
 	err := r.db.QueryRow(
-		`SELECT id, uuid, username, password, created_at FROM users WHERE username = $1`,
+		`SELECT id, uuid, username, password, recovery_key, created_at FROM users WHERE username = $1`,
 		strings.ToLower(username),
-	).Scan(&user.ID, &user.UUID, &user.Username, &hashedPw, &user.CreatedAt)
+	).Scan(&user.ID, &user.UUID, &user.Username, &hashedPw, &recKey, &user.CreatedAt)
+	if recKey.Valid {
+		user.RecoveryKey = recKey.String
+	}
 	return user, hashedPw, err
+}
+
+func (r *authRepository) UpdatePassword(userID int, newHashedPassword string) error {
+	_, err := r.db.Exec(`UPDATE users SET password = $1 WHERE id = $2`, newHashedPassword, userID)
+	return err
 }
 
 func (r *authRepository) GetUserByID(id int) (models.User, error) {

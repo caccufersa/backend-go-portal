@@ -20,6 +20,7 @@ import (
 type AuthService interface {
 	Register(req models.RegisterRequest, userAgent, ip string) (models.AuthResponse, error)
 	Login(req models.LoginRequest, userAgent, ip string) (models.AuthResponse, error)
+	ResetPassword(req models.ResetPasswordRequest) error
 	Refresh(refreshToken string) (models.AuthResponse, error)
 	Session(tokenStr, refreshToken string) (models.AuthResponse, error)
 	Me(userID int) (models.User, error)
@@ -78,9 +79,11 @@ func (s *authService) Register(req models.RegisterRequest, userAgent, ip string)
 		return models.AuthResponse{}, fmt.Errorf("erro interno")
 	}
 
-	user, err := s.repo.CreateUser(req.Username, string(hashed))
+	recoveryKey := generateRecoveryKey()
+
+	user, err := s.repo.CreateUser(req.Username, string(hashed), recoveryKey)
 	if err != nil {
-		if strings.Contains(err.Error(), "duplicate key") {
+		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "users_username_key") {
 			return models.AuthResponse{}, fmt.Errorf("username já existe")
 		}
 		return models.AuthResponse{}, fmt.Errorf("erro ao criar conta")
@@ -104,8 +107,45 @@ func (s *authService) Login(req models.LoginRequest, userAgent, ip string) (mode
 		return models.AuthResponse{}, fmt.Errorf("username ou senha incorretos")
 	}
 
+	// Não retornar o recovery key no login, apenas no register
+	user.RecoveryKey = ""
+
 	s.setUser(user)
 	return s.createSessionAndRespond(user, userAgent, ip)
+}
+
+func (s *authService) ResetPassword(req models.ResetPasswordRequest) error {
+	if req.Username == "" || req.RecoveryKey == "" || req.NewPassword == "" {
+		return fmt.Errorf("todos os campos são obrigatórios")
+	}
+
+	if err := validatePassword(req.NewPassword); err != nil {
+		return err
+	}
+
+	user, _, err := s.repo.GetUserByUsername(req.Username)
+	if err != nil {
+		return fmt.Errorf("dados inválidos")
+	}
+
+	if user.RecoveryKey == "" || !strings.EqualFold(user.RecoveryKey, req.RecoveryKey) {
+		return fmt.Errorf("código de recuperação inválido")
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("erro interno")
+	}
+
+	if err := s.repo.UpdatePassword(user.ID, string(hashed)); err != nil {
+		return fmt.Errorf("erro ao redefinir a senha")
+	}
+
+	// Invalidate sessions and cache
+	s.deleteUserCache(user.ID)
+	s.repo.DeleteAllSessionsByUserID(user.ID)
+
+	return nil
 }
 
 func (s *authService) Refresh(refreshToken string) (models.AuthResponse, error) {
@@ -324,6 +364,12 @@ func generateRefreshToken() string {
 	b := make([]byte, 32)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func generateRecoveryKey() string {
+	b := make([]byte, 4) // 8 hex chars
+	rand.Read(b)
+	return fmt.Sprintf("CACC-%s", strings.ToUpper(hex.EncodeToString(b)))
 }
 
 func validateUsername(u string) error {

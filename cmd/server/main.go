@@ -81,6 +81,14 @@ func main() {
 		},
 	}), auth.Login)
 
+	authGroup.Post("/reset-password", limiter.New(limiter.Config{
+		Max:        5,
+		Expiration: 5 * time.Minute,
+		KeyGenerator: func(c *fiber.Ctx) string {
+			return c.IP()
+		},
+	}), auth.ResetPassword)
+
 	authGroup.Post("/refresh", auth.Refresh)
 	authGroup.Get("/session", auth.Session)
 
@@ -149,6 +157,8 @@ func main() {
 	busPriv.Post("/reserve", bus.Reserve)
 	busPriv.Post("/cancel", bus.Cancel)
 	busPriv.Get("/me", bus.MyReservations)
+	busPriv.Get("/contact", bus.GetContact)
+	busPriv.Put("/contact", bus.SetContact)
 
 	notifPriv := app.Group("/notifications", middleware.AuthMiddleware)
 	notifPriv.Get("/", notifHandler.GetNotifications)

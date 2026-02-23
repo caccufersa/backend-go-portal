@@ -46,3 +46,7 @@ type TripUpdateRequest struct {
 	IsCompleted   *bool      `json:"is_completed,omitempty"`
 	DepartureTime *time.Time `json:"departure_time,omitempty"`
 }
+
+type BusProfile struct {
+	Phone int64 `json:"phone"`
+}

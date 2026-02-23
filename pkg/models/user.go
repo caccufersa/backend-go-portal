@@ -3,10 +3,11 @@ package models
 import "time"
 
 type User struct {
-	ID        int       `json:"id"`
-	UUID      string    `json:"uuid"`
-	Username  string    `json:"username"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          int       `json:"id"`
+	UUID        string    `json:"uuid"`
+	Username    string    `json:"username"`
+	CreatedAt   time.Time `json:"created_at"`
+	RecoveryKey string    `json:"recovery_key,omitempty"`
 }
 
 type RegisterRequest struct {
@@ -17,6 +18,12 @@ type RegisterRequest struct {
 type LoginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+type ResetPasswordRequest struct {
+	Username    string `json:"username"`
+	RecoveryKey string `json:"recovery_key"`
+	NewPassword string `json:"new_password"`
 }
 
 type AuthResponse struct {

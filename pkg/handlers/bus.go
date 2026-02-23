@@ -155,3 +155,37 @@ func (h *BusHandler) Cancel(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"status": "cancelled", "seat": seat})
 }
+
+// ── USER PROFILE ──
+
+func (h *BusHandler) SetContact(c *fiber.Ctx) error {
+	userID, ok := c.Locals("user_id").(int)
+	if !ok || userID <= 0 {
+		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	var req models.BusProfile
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid Body"})
+	}
+
+	if err := h.service.SetUserContact(userID, req.Phone); err != nil {
+		return c.Status(400).JSON(fiber.Map{"erro": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"status": "ok"})
+}
+
+func (h *BusHandler) GetContact(c *fiber.Ctx) error {
+	userID, ok := c.Locals("user_id").(int)
+	if !ok || userID <= 0 {
+		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	phone, err := h.service.GetUserContact(userID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao buscar contato"})
+	}
+
+	return c.JSON(fiber.Map{"phone": phone})
+}

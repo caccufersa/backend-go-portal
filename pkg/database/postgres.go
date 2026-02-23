@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS users (
 	uuid UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
 	username TEXT UNIQUE NOT NULL,
 	password TEXT NOT NULL,
+	recovery_key TEXT UNIQUE,
 	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -112,8 +113,17 @@ CREATE TABLE IF NOT EXISTS bus_seats (
 	PRIMARY KEY (trip_id, seat_number)
 );
 
+CREATE TABLE IF NOT EXISTS bus_profiles (
+	user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+	phone BIGINT NOT NULL,
+	updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 ALTER TABLE users ADD COLUMN IF NOT EXISTS uuid UUID UNIQUE DEFAULT gen_random_uuid();
 UPDATE users SET uuid = gen_random_uuid() WHERE uuid IS NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_key TEXT;
+UPDATE users SET recovery_key = 'CACC-' || upper(substr(md5(random()::text), 1, 8)) WHERE recovery_key IS NULL;
+ALTER TABLE users ADD CONSTRAINT users_recovery_key_key UNIQUE (recovery_key) DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS reply_count INT NOT NULL DEFAULT 0;
 UPDATE posts p SET reply_count = (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id) WHERE reply_count = 0;

@@ -19,6 +19,9 @@ type BusService interface {
 	Reserve(userID int, tripID string, seatNumber int) (int, error)
 	MyReservations(userID int) ([]models.MyReservation, error)
 	Cancel(userID int, tripID string, seatNumber int) (int, error)
+
+	SetUserContact(userID int, phone int64) error
+	GetUserContact(userID int) (int64, error)
 }
 
 type busService struct {
@@ -126,4 +129,16 @@ func (s *busService) Cancel(userID int, tripID string, seatNumber int) (int, err
 		s.redis.Del(fmt.Sprintf("bus:%s:seats", tripID))
 	}
 	return seat, err
+}
+
+func (s *busService) SetUserContact(userID int, phone int64) error {
+	if phone <= 0 {
+		return fmt.Errorf("telefone inválido, deve conter apenas dígitos e ser maior que 0")
+	}
+
+	return s.repo.SetUserContact(userID, phone)
+}
+
+func (s *busService) GetUserContact(userID int) (int64, error) {
+	return s.repo.GetUserContact(userID)
 }
