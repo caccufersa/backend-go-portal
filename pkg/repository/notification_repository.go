@@ -20,7 +20,6 @@ func NewNotificationRepository(db *sql.DB) NotificationRepository {
 }
 
 func (r *notificationRepository) CreateNotification(userID int, actorID *int, notificationType string, postID *int) error {
-	// Don't notify yourself
 	if actorID != nil && *actorID == userID {
 		return nil
 	}
