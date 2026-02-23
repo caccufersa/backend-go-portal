@@ -13,10 +13,11 @@ type SocialRepository interface {
 	Replies(parentID, userID, limit int) ([]models.Post, error)
 	ProfilePosts(profileUserID, requestingUserID, limit int) ([]models.Post, error)
 	ProfileStats(userID int) (totalPosts, totalLikes int)
-	ProfileInfo(userID int) (username, displayName, bio string, err error)
-	UpdateProfile(userID int, displayName, bio string) error
+	ProfileInfo(userID int) (username, displayName, bio, avatar string, err error)
+	UpdateProfile(userID int, displayName, bio, avatarURL string) error
 	CreatePost(texto, author string, userID int) (models.Post, error)
 	CreateReply(texto, author string, userID, parentID int) (models.Post, error)
+	CreateRepost(userID, repostID int) (models.Post, error)
 	IncrementReplyCount(parentID int) error
 	LikePost(userID, postID int) (success bool, err error)
 	UnlikePost(userID, postID int) (success bool, err error)
@@ -37,7 +38,7 @@ func NewSocialRepository(db *sql.DB) SocialRepository {
 
 func (r *socialRepository) Feed(userID, limit, offset int) ([]models.Post, error) {
 	rows, err := r.db.Query(`
-		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(p.user_id, 0), p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(sp.avatar_url, ''), COALESCE(p.user_id, 0), p.repost_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $3) AS liked
 		FROM posts p
 		LEFT JOIN users u ON p.user_id = u.id
@@ -54,7 +55,7 @@ func (r *socialRepository) Feed(userID, limit, offset int) ([]models.Post, error
 	var posts []models.Post
 	for rows.Next() {
 		var p models.Post
-		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.UserID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked); err == nil {
+		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.AvatarURL, &p.UserID, &p.RepostID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked); err == nil {
 			p.Replies = []models.Post{}
 			posts = append(posts, p)
 		}
@@ -65,21 +66,21 @@ func (r *socialRepository) Feed(userID, limit, offset int) ([]models.Post, error
 func (r *socialRepository) Thread(postID, userID int) (models.Post, error) {
 	var p models.Post
 	err := r.db.QueryRow(`
-		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(p.user_id, 0), p.parent_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(sp.avatar_url, ''), COALESCE(p.user_id, 0), p.parent_id, p.repost_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $2) AS liked
 		FROM posts p
 		LEFT JOIN users u ON p.user_id = u.id
 		LEFT JOIN social_profiles sp ON p.user_id = sp.user_id
 		WHERE p.id = $1
 	`, postID, userID).Scan(
-		&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.UserID, &p.ParentID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked,
+		&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.AvatarURL, &p.UserID, &p.ParentID, &p.RepostID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked,
 	)
 	return p, err
 }
 
 func (r *socialRepository) Replies(parentID, userID, limit int) ([]models.Post, error) {
 	rows, err := r.db.Query(`
-		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(p.user_id, 0), p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(sp.avatar_url, ''), COALESCE(p.user_id, 0), p.repost_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $2) AS liked
 		FROM posts p
 		LEFT JOIN users u ON p.user_id = u.id
@@ -96,7 +97,7 @@ func (r *socialRepository) Replies(parentID, userID, limit int) ([]models.Post, 
 	var posts []models.Post
 	for rows.Next() {
 		var p models.Post
-		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.UserID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked); err == nil {
+		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.AvatarURL, &p.UserID, &p.RepostID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked); err == nil {
 			posts = append(posts, p)
 		}
 	}
@@ -122,7 +123,7 @@ func (r *socialRepository) ProfilePosts(profileUserID, requestingUserID, limit i
 	var posts []models.Post
 	for rows.Next() {
 		var p models.Post
-		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.UserID, &p.ParentID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked); err == nil {
+		if err := rows.Scan(&p.ID, &p.Texto, &p.Author, &p.AuthorName, &p.AvatarURL, &p.UserID, &p.ParentID, &p.RepostID, &p.Likes, &p.ReplyCount, &p.CreatedAt, &p.Liked); err == nil {
 			p.Replies = []models.Post{}
 			posts = append(posts, p)
 		}
@@ -139,26 +140,27 @@ func (r *socialRepository) ProfileStats(userID int) (int, int) {
 	return totalPosts, totalLikes
 }
 
-func (r *socialRepository) ProfileInfo(userID int) (string, string, string, error) {
-	var username, displayName, bio string
+func (r *socialRepository) ProfileInfo(userID int) (string, string, string, string, error) {
+	var username, displayName, bio, avatar string
 	err := r.db.QueryRow(`
-		SELECT u.username, COALESCE(sp.display_name, u.username), COALESCE(sp.bio, '')
+		SELECT u.username, COALESCE(sp.display_name, u.username), COALESCE(sp.bio, ''), COALESCE(sp.avatar_url, '')
 		FROM users u
 		LEFT JOIN social_profiles sp ON u.id = sp.user_id
 		WHERE u.id = $1
-	`, userID).Scan(&username, &displayName, &bio)
-	return username, displayName, bio, err
+	`, userID).Scan(&username, &displayName, &bio, &avatar)
+	return username, displayName, bio, avatar, err
 }
 
-func (r *socialRepository) UpdateProfile(userID int, displayName, bio string) error {
+func (r *socialRepository) UpdateProfile(userID int, displayName, bio, avatarURL string) error {
 	_, err := r.db.Exec(`
-		INSERT INTO social_profiles (user_id, display_name, bio, updated_at)
-		VALUES ($1, $2, $3, NOW())
+		INSERT INTO social_profiles (user_id, display_name, bio, avatar_url, updated_at)
+		VALUES ($1, $2, $3, $4, NOW())
 		ON CONFLICT (user_id) DO UPDATE 
 		SET display_name = EXCLUDED.display_name, 
 		    bio = EXCLUDED.bio,
+		    avatar_url = EXCLUDED.avatar_url,
 		    updated_at = NOW()
-	`, userID, displayName, bio)
+	`, userID, displayName, bio, avatarURL)
 	return err
 }
 
@@ -182,6 +184,16 @@ func (r *socialRepository) CreateReply(texto, author string, userID, parentID in
 		)
 		SELECT nr.id, nr.created_at FROM new_reply nr
 	`, texto, author, userID, parentID).Scan(&p.ID, &p.CreatedAt)
+	return p, err
+}
+
+func (r *socialRepository) CreateRepost(userID, repostID int) (models.Post, error) {
+	var p models.Post
+	err := r.db.QueryRow(`
+		INSERT INTO posts (texto, author, user_id, repost_id, likes, reply_count)
+		VALUES ('', (SELECT username FROM users WHERE id = $1), $1, $2, 0, 0)
+		RETURNING id, created_at
+	`, userID, repostID).Scan(&p.ID, &p.CreatedAt)
 	return p, err
 }
 
@@ -262,7 +274,7 @@ func (r *socialRepository) BatchLoadReplies(parentIDs []int, userID int) (map[in
 	}
 
 	query := fmt.Sprintf(`
-		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(p.user_id, 0), p.parent_id, p.likes, p.reply_count, p.created_at,
+		SELECT p.id, p.texto, COALESCE(u.username, p.author), COALESCE(sp.display_name, u.username, p.author), COALESCE(sp.avatar_url, ''), COALESCE(p.user_id, 0), p.parent_id, p.repost_id, p.likes, p.reply_count, p.created_at,
 		       EXISTS(SELECT 1 FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = $1) AS liked
 		FROM posts p
 		LEFT JOIN users u ON p.user_id = u.id
@@ -286,7 +298,7 @@ func (r *socialRepository) BatchLoadReplies(parentIDs []int, userID int) (map[in
 	for rows.Next() {
 		var r models.Post
 		var parentID int
-		if err := rows.Scan(&r.ID, &r.Texto, &r.Author, &r.AuthorName, &r.UserID, &parentID, &r.Likes, &r.ReplyCount, &r.CreatedAt, &r.Liked); err == nil {
+		if err := rows.Scan(&r.ID, &r.Texto, &r.Author, &r.AuthorName, &r.AvatarURL, &r.UserID, &parentID, &r.RepostID, &r.Likes, &r.ReplyCount, &r.CreatedAt, &r.Liked); err == nil {
 			r.ParentID = &parentID
 			r.Replies = []models.Post{}
 			result[parentID] = append(result[parentID], r)

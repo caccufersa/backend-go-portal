@@ -117,9 +117,22 @@ UPDATE users SET uuid = gen_random_uuid() WHERE uuid IS NULL;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS reply_count INT NOT NULL DEFAULT 0;
 UPDATE posts p SET reply_count = (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id) WHERE reply_count = 0;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS repost_id INT REFERENCES posts(id) ON DELETE SET NULL;
+ALTER TABLE social_profiles ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+
 ALTER TABLE noticias ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}';
 ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS author TEXT;
 ALTER TABLE sugestoes ADD COLUMN IF NOT EXISTS categoria TEXT DEFAULT 'Geral';
+
+CREATE TABLE IF NOT EXISTS notifications (
+	id SERIAL PRIMARY KEY,
+	user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	actor_id INT REFERENCES users(id) ON DELETE SET NULL,
+	type TEXT NOT NULL,         -- 'like', 'reply', 'mention', 'repost'
+	post_id INT REFERENCES posts(id) ON DELETE CASCADE,
+	is_read BOOLEAN NOT NULL DEFAULT false,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 INSERT INTO bus_seats (trip_id, seat_number) 
  SELECT 't1', generate_series(1, 36)
@@ -143,12 +156,15 @@ CREATE INDEX IF NOT EXISTS idx_posts_feed ON posts(created_at DESC) WHERE parent
 CREATE INDEX IF NOT EXISTS idx_posts_user_created ON posts(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_posts_parent_created ON posts(parent_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_posts_reply_count ON posts(reply_count) WHERE reply_count > 0;
+CREATE INDEX IF NOT EXISTS idx_posts_repost ON posts(repost_id) WHERE repost_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_noticias_created ON noticias(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_noticias_categoria ON noticias(categoria);
 CREATE INDEX IF NOT EXISTS idx_noticias_destaque ON noticias(destaque) WHERE destaque = true;
 CREATE INDEX IF NOT EXISTS idx_noticias_tags ON noticias USING GIN(tags);
 CREATE INDEX IF NOT EXISTS idx_post_likes_user ON post_likes(user_id);
 CREATE INDEX IF NOT EXISTS idx_post_likes_post ON post_likes(post_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, is_read);
+CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS bus_trips (
 	id TEXT PRIMARY KEY,

@@ -14,9 +14,10 @@ type SocialService interface {
 	Feed(limit, offset, userID int) ([]models.Post, error)
 	Thread(postID, userID int) (models.Post, error)
 	Profile(username string, profileUserID, requestingUserID int) (models.Profile, error)
-	UpdateProfile(userID int, displayName, bio string) error
+	UpdateProfile(userID int, displayName, bio, avatarURL string) error
 	CreatePost(texto, username string, userID int) (models.Post, error)
 	CreateReply(texto, username string, userID, parentID int) (models.Post, error)
+	CreateRepost(userID, repostID int) (models.Post, error)
 	Like(userID, postID int) (map[string]interface{}, error)
 	Unlike(userID, postID int) (map[string]interface{}, error)
 	Delete(userID, postID int) error
@@ -25,11 +26,12 @@ type SocialService interface {
 type socialService struct {
 	repo  repository.SocialRepository
 	auth  repository.AuthRepository // Used for finding users by username if needed for profile
+	notif repository.NotificationRepository
 	redis *cache.Redis
 }
 
-func NewSocialService(repo repository.SocialRepository, auth repository.AuthRepository, redis *cache.Redis) SocialService {
-	return &socialService{repo: repo, auth: auth, redis: redis}
+func NewSocialService(repo repository.SocialRepository, auth repository.AuthRepository, notif repository.NotificationRepository, redis *cache.Redis) SocialService {
+	return &socialService{repo: repo, auth: auth, notif: notif, redis: redis}
 }
 
 func (s *socialService) Feed(limit, offset, userID int) ([]models.Post, error) {
@@ -150,12 +152,13 @@ func (s *socialService) Profile(username string, profileUserID, requestingUserID
 		}
 	}
 
-	un, displayName, bio, _ := s.repo.ProfileInfo(userID)
+	un, displayName, bio, avatarURL, _ := s.repo.ProfileInfo(userID)
 
 	profile := models.Profile{
 		Username:    un,
 		DisplayName: displayName,
 		Bio:         bio,
+		AvatarURL:   avatarURL,
 		TotalPosts:  totalPosts,
 		TotalLikes:  totalLikes,
 		Posts:       posts,
@@ -165,8 +168,8 @@ func (s *socialService) Profile(username string, profileUserID, requestingUserID
 	return profile, nil
 }
 
-func (s *socialService) UpdateProfile(userID int, displayName, bio string) error {
-	err := s.repo.UpdateProfile(userID, displayName, bio)
+func (s *socialService) UpdateProfile(userID int, displayName, bio, avatarURL string) error {
+	err := s.repo.UpdateProfile(userID, displayName, bio, avatarURL)
 	if err == nil {
 		s.redis.Del(fmt.Sprintf("social:profile:%d", userID))
 		s.redis.DelPattern("social:feed:*")
@@ -180,11 +183,12 @@ func (s *socialService) CreatePost(texto, username string, userID int) (models.P
 		return p, err
 	}
 
-	_, displayName, _, _ := s.repo.ProfileInfo(userID)
+	_, displayName, _, avatar, _ := s.repo.ProfileInfo(userID)
 
 	p.Texto = texto
 	p.Author = username
 	p.AuthorName = username
+	p.AvatarURL = avatar
 	if displayName != "" {
 		p.AuthorName = displayName
 	}
@@ -193,6 +197,8 @@ func (s *socialService) CreatePost(texto, username string, userID int) (models.P
 	p.Likes = 0
 	p.ReplyCount = 0
 	p.Replies = []models.Post{}
+
+	s.processMentions(texto, userID, p.ID)
 
 	s.redis.DelPattern("social:feed:*")
 	s.redis.Del(fmt.Sprintf("social:profile:%d", userID))
@@ -207,11 +213,12 @@ func (s *socialService) CreateReply(texto, username string, userID, parentID int
 	}
 
 	s.repo.IncrementReplyCount(parentID)
-	_, displayName, _, _ := s.repo.ProfileInfo(userID)
+	_, displayName, _, avatar, _ := s.repo.ProfileInfo(userID)
 
 	reply.Texto = texto
 	reply.Author = username
 	reply.AuthorName = username
+	reply.AvatarURL = avatar
 	if displayName != "" {
 		reply.AuthorName = displayName
 	}
@@ -222,11 +229,64 @@ func (s *socialService) CreateReply(texto, username string, userID, parentID int
 	reply.ReplyCount = 0
 	reply.Replies = []models.Post{}
 
+	// Notify parent user
+	parentPost, _ := s.repo.Thread(parentID, userID)
+	if parentPost.ID != 0 && parentPost.UserID != userID {
+		s.notif.CreateNotification(parentPost.UserID, &userID, "reply", &reply.ID)
+	}
+
+	s.processMentions(texto, userID, reply.ID)
+
 	s.redis.Del(fmt.Sprintf("social:thread:%d", parentID))
 	s.redis.DelPattern("social:feed:*")
 	s.redis.Del(fmt.Sprintf("social:profile:%d", userID))
 
 	return reply, nil
+}
+
+func (s *socialService) CreateRepost(userID, repostID int) (models.Post, error) {
+	p, err := s.repo.CreateRepost(userID, repostID)
+	if err != nil {
+		return p, err
+	}
+
+	_, displayName, _, avatar, _ := s.repo.ProfileInfo(userID)
+
+	p.Author = "Você"
+	p.AuthorName = "Você"
+	p.AvatarURL = avatar
+	if displayName != "" {
+		p.AuthorName = displayName
+	}
+
+	p.UserID = userID
+	p.RepostID = &repostID
+	p.Likes = 0
+	p.ReplyCount = 0
+	p.Replies = []models.Post{}
+
+	originalPost, _ := s.repo.Thread(repostID, userID)
+	if originalPost.ID != 0 && originalPost.UserID != userID {
+		s.notif.CreateNotification(originalPost.UserID, &userID, "repost", &p.ID)
+	}
+
+	s.redis.DelPattern("social:feed:*")
+	s.redis.Del(fmt.Sprintf("social:profile:%d", userID))
+
+	return p, nil
+}
+
+func (s *socialService) processMentions(texto string, actorID int, postID int) {
+	words := strings.Fields(texto)
+	for _, w := range words {
+		if strings.HasPrefix(w, "@") && len(w) > 1 {
+			username := strings.TrimPrefix(w, "@")
+			user, _, err := s.auth.GetUserByUsername(username)
+			if err == nil && user.ID != 0 && user.ID != actorID {
+				s.notif.CreateNotification(user.ID, &actorID, "mention", &postID)
+			}
+		}
+	}
 }
 
 func (s *socialService) toggleLike(userID, postID int, isLike bool) (map[string]interface{}, error) {
@@ -246,7 +306,11 @@ func (s *socialService) toggleLike(userID, postID int, isLike bool) (map[string]
 	var newLikes int
 	if success {
 		if isLike {
-			newLikes, err = s.repo.IncLikeCount(postID)
+			newLikes, _ = s.repo.IncLikeCount(postID)
+			post, err := s.repo.Thread(postID, userID)
+			if err == nil && post.UserID != userID {
+				s.notif.CreateNotification(post.UserID, &userID, "like", &postID)
+			}
 		} else {
 			newLikes, err = s.repo.DecLikeCount(postID)
 		}

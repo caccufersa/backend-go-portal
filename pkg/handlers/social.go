@@ -92,6 +92,7 @@ func (sh *SocialHandler) UpdateProfile(c *fiber.Ctx) error {
 	var req struct {
 		DisplayName string `json:"display_name"`
 		Bio         string `json:"bio"`
+		AvatarURL   string `json:"avatar_url"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
@@ -99,6 +100,7 @@ func (sh *SocialHandler) UpdateProfile(c *fiber.Ctx) error {
 
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	req.Bio = strings.TrimSpace(req.Bio)
+	req.AvatarURL = strings.TrimSpace(req.AvatarURL)
 
 	if len(req.DisplayName) > 50 {
 		return c.Status(400).JSON(fiber.Map{"erro": "Display Name muito longo (máx 50)"})
@@ -107,7 +109,7 @@ func (sh *SocialHandler) UpdateProfile(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"erro": "Bio muito longa (máx 500)"})
 	}
 
-	if err := sh.service.UpdateProfile(userID, req.DisplayName, req.Bio); err != nil {
+	if err := sh.service.UpdateProfile(userID, req.DisplayName, req.Bio, req.AvatarURL); err != nil {
 		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao atualizar perfil"})
 	}
 
@@ -194,6 +196,28 @@ func (sh *SocialHandler) CreateReply(c *fiber.Ctx) error {
 		"parent_id": parentID,
 	})
 	return c.Status(201).JSON(reply)
+}
+
+// POST /social/feed/:id/repost
+func (sh *SocialHandler) CreateRepost(c *fiber.Ctx) error {
+	repostID, err := strconv.Atoi(c.Params("id"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"erro": "ID inválido"})
+	}
+
+	userID, ok := c.Locals("user_id").(int)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"erro": "Não autenticado"})
+	}
+
+	// Will add this to service interface next.
+	post, err := sh.service.CreateRepost(userID, repostID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao fazer repost"})
+	}
+
+	go sh.hub.Broadcast("new_post", "social", post)
+	return c.Status(201).JSON(post)
 }
 
 func (sh *SocialHandler) LikePost(c *fiber.Ctx) error {

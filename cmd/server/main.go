@@ -45,8 +45,10 @@ func main() {
 	auth := handlers.NewAuth(wsHub, authService)
 
 	socialRepo := repository.NewSocialRepository(db)
-	socialService := services.NewSocialService(socialRepo, authRepo, redis)
+	notifRepo := repository.NewNotificationRepository(db)
+	socialService := services.NewSocialService(socialRepo, authRepo, notifRepo, redis)
 	social := handlers.NewSocial(wsHub, socialService)
+	notifHandler := handlers.NewNotification(notifRepo)
 
 	noticiasRepo := repository.NewNoticiasRepository(db)
 	noticiasService := services.NewNoticiasService(noticiasRepo, redis)
@@ -147,6 +149,10 @@ func main() {
 	busPriv.Post("/reserve", bus.Reserve)
 	busPriv.Post("/cancel", bus.Cancel)
 	busPriv.Get("/me", bus.MyReservations)
+
+	notifPriv := app.Group("/notifications", middleware.AuthMiddleware)
+	notifPriv.Get("/", notifHandler.GetNotifications)
+	notifPriv.Put("/read", notifHandler.MarkAsRead)
 
 	app.Use("/ws", parseWSToken)
 

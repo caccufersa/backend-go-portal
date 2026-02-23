@@ -11,8 +11,11 @@ type Post struct {
 	Texto      string    `json:"texto"`
 	Author     string    `json:"author"`      // Username / @handle
 	AuthorName string    `json:"author_name"` // Display Name (perfil social)
+	AvatarURL  string    `json:"avatar_url"`
 	UserID     int       `json:"user_id"`
 	ParentID   *int      `json:"parent_id,omitempty"`
+	RepostID   *int      `json:"repost_id,omitempty"`
+	Repost     *Post     `json:"repost,omitempty"`
 	Likes      int       `json:"likes"`
 	Liked      bool      `json:"liked"`
 	ReplyCount int       `json:"reply_count"`
@@ -66,6 +69,7 @@ type Profile struct {
 	Username    string `json:"username"`     // @handle
 	DisplayName string `json:"display_name"` // Nome Perfil
 	Bio         string `json:"bio"`
+	AvatarURL   string `json:"avatar_url"`
 	TotalPosts  int    `json:"total_posts"`
 	TotalLikes  int    `json:"total_likes"`
 	Posts       []Post `json:"posts"`
