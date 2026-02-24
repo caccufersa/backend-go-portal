@@ -62,6 +62,10 @@ func main() {
 	busService := services.NewBusService(busRepo, redis)
 	bus := handlers.NewBus(busService)
 
+	galeriaRepo := repository.NewGaleriaRepository(db)
+	galeriaService := services.NewGaleriaService(galeriaRepo)
+	galeria := handlers.NewGaleria(galeriaService, socialRepo)
+
 	app := server.NewApp("portal")
 
 	authGroup := app.Group("/auth")
@@ -124,9 +128,10 @@ func main() {
 
 	// ── Social (Feed, Threads, Profiles) ──
 	socialGroup := app.Group("/social")
-	socialGroup.Get("/feed", social.Feed)
-	socialGroup.Get("/feed/:id", social.Thread)
-	socialGroup.Get("/profile/:username?", social.Profile)
+	socialGroup.Get("/feed", middleware.OptionalAuthMiddleware, social.Feed)
+	socialGroup.Get("/feed/:id", middleware.OptionalAuthMiddleware, social.Thread)
+	// profile: público mas injeta user_id se o token for enviado (necessário para /profile sem username)
+	socialGroup.Get("/profile/:username?", middleware.OptionalAuthMiddleware, social.Profile)
 
 	socialPriv := socialGroup.Group("", middleware.AuthMiddleware)
 	socialPriv.Put("/profile", social.UpdateProfile)
@@ -163,6 +168,13 @@ func main() {
 	notifPriv := app.Group("/notifications", middleware.AuthMiddleware)
 	notifPriv.Get("/", notifHandler.GetNotifications)
 	notifPriv.Put("/read", notifHandler.MarkAsRead)
+
+	// ── Galeria (leitura pública, upload/delete autenticado) ──
+	galeriaGroup := app.Group("/galeria")
+	galeriaGroup.Get("/list", galeria.List)
+	galeriaPriv := galeriaGroup.Group("", middleware.AuthMiddleware)
+	galeriaPriv.Post("/upload", galeria.Upload)
+	galeriaPriv.Delete("/:id", galeria.Delete)
 
 	app.Use("/ws", parseWSToken)
 

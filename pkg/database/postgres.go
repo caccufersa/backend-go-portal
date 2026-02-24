@@ -176,6 +176,21 @@ CREATE INDEX IF NOT EXISTS idx_post_likes_post ON post_likes(post_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, is_read);
 CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at DESC);
 
+CREATE TABLE IF NOT EXISTS galeria (
+	id SERIAL PRIMARY KEY,
+	user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	author TEXT NOT NULL DEFAULT '',
+	author_name TEXT NOT NULL DEFAULT '',
+	avatar_url TEXT NOT NULL DEFAULT '',
+	image_url TEXT NOT NULL,
+	public_id TEXT,
+	caption TEXT,
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_galeria_created ON galeria(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_galeria_user ON galeria(user_id);
+
 CREATE TABLE IF NOT EXISTS bus_trips (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
