@@ -1,20 +1,29 @@
 package middleware
 
 import (
-	"os"
+	"crypto/subtle"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 )
 
+var jwtSecretBytes []byte
+var adminKeyBytes []byte
+
+// InitSecrets must be called once at startup to inject secrets.
+// This avoids reading os.Getenv on every request.
+func InitSecrets(jwtSecret, adminKey string) {
+	jwtSecretBytes = []byte(jwtSecret)
+	adminKeyBytes = []byte(adminKey)
+}
+
 func parseJWT(tokenStr string) (userID int, userUUID, username string, ok bool) {
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		secret = "dev-secret-key-change-in-production"
-	}
 	token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
-		return []byte(secret), nil
+		if _, hmac := t.Method.(*jwt.SigningMethodHMAC); !hmac {
+			return nil, fiber.ErrUnauthorized
+		}
+		return jwtSecretBytes, nil
 	})
 	if err != nil || !token.Valid {
 		return 0, "", "", false
@@ -26,7 +35,7 @@ func parseJWT(tokenStr string) (userID int, userUUID, username string, ok bool) 
 	return userID, userUUID, username, true
 }
 
-// AuthMiddleware exige token JWT válido; retorna 401 se ausente ou inválido.
+// AuthMiddleware requires a valid JWT; returns 401 otherwise.
 func AuthMiddleware(c *fiber.Ctx) error {
 	auth := c.Get("Authorization")
 	if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
@@ -42,9 +51,9 @@ func AuthMiddleware(c *fiber.Ctx) error {
 	return c.Next()
 }
 
-// OptionalAuthMiddleware popula os locals do usuário se houver token válido,
-// mas NÃO bloqueia a requisição se não houver token – útil para rotas públicas
-// que exibem conteúdo extra quando o usuário está logado.
+// OptionalAuthMiddleware populates user locals if a valid token is present,
+// but does NOT block the request – useful for public routes with extra info
+// when the user is logged in.
 func OptionalAuthMiddleware(c *fiber.Ctx) error {
 	auth := c.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
@@ -57,17 +66,11 @@ func OptionalAuthMiddleware(c *fiber.Ctx) error {
 	return c.Next()
 }
 
+// AdminMiddleware validates the X-Admin-Key header using constant-time comparison.
 func AdminMiddleware(c *fiber.Ctx) error {
-	adminKey := c.Get("X-Admin-Key")
-	expectedKey := os.Getenv("ADMIN_SECRET_KEY")
-
-	if expectedKey == "" {
-		expectedKey = "dev-admin-secret"
-	}
-
-	if adminKey != expectedKey {
+	provided := []byte(c.Get("X-Admin-Key"))
+	if subtle.ConstantTimeCompare(provided, adminKeyBytes) != 1 {
 		return c.Status(403).JSON(fiber.Map{"erro": "Acesso negado: Chave administrativa secreta inválida"})
 	}
-
 	return c.Next()
 }

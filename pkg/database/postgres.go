@@ -42,8 +42,9 @@ CREATE TABLE IF NOT EXISTS users (
 	id SERIAL PRIMARY KEY,
 	uuid UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
 	username TEXT UNIQUE NOT NULL,
-	password TEXT NOT NULL,
-	recovery_key TEXT UNIQUE,
+	password TEXT NOT NULL DEFAULT '',
+	email TEXT,
+	google_id TEXT,
 	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -121,9 +122,35 @@ CREATE TABLE IF NOT EXISTS bus_profiles (
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS uuid UUID UNIQUE DEFAULT gen_random_uuid();
 UPDATE users SET uuid = gen_random_uuid() WHERE uuid IS NULL;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_key TEXT;
-UPDATE users SET recovery_key = 'CACC-' || upper(substr(md5(random()::text), 1, 8)) WHERE recovery_key IS NULL;
-ALTER TABLE users ADD CONSTRAINT users_recovery_key_key UNIQUE (recovery_key) DEFERRABLE INITIALLY DEFERRED;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id TEXT;
+ALTER TABLE users ALTER COLUMN password SET DEFAULT '';
+
+-- Unique email (partial — NULLs allowed, only populated emails must be unique)
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_email_key') THEN
+    ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);
+  END IF;
+END $$;
+
+-- Unique google_id
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'users_google_id_key') THEN
+    ALTER TABLE users ADD CONSTRAINT users_google_id_key UNIQUE (google_id);
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_google ON users(google_id) WHERE google_id IS NOT NULL;
+
+-- Password reset tokens (one per user)
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL,
+  expires_at TIMESTAMP NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS reply_count INT NOT NULL DEFAULT 0;
 UPDATE posts p SET reply_count = (SELECT COUNT(*) FROM posts c WHERE c.parent_id = p.id) WHERE reply_count = 0;
@@ -190,6 +217,12 @@ CREATE TABLE IF NOT EXISTS galeria (
 
 CREATE INDEX IF NOT EXISTS idx_galeria_created ON galeria(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_galeria_user ON galeria(user_id);
+
+-- Migration: clear old sessions with plaintext refresh tokens.
+-- After this deploy, all refresh tokens are stored as SHA-256 hashes.
+-- Users will simply need to log in again.
+DELETE FROM sessions WHERE LENGTH(refresh_token) < 64;
+
 
 CREATE TABLE IF NOT EXISTS bus_trips (
 	id TEXT PRIMARY KEY,

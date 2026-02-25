@@ -23,6 +23,23 @@ import (
 )
 
 func main() {
+	// ── Secrets (read once, inject everywhere) ──────────────────────────
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		jwtSecret = "dev-secret-key-change-in-production"
+		log.Println("[PORTAL] ⚠  JWT_SECRET not set – using dev default")
+	}
+
+	adminKey := os.Getenv("ADMIN_SECRET_KEY")
+	if adminKey == "" {
+		adminKey = "dev-admin-secret"
+		log.Println("[PORTAL] ⚠  ADMIN_SECRET_KEY not set – using dev default")
+	}
+
+	// Inject secrets into middleware (called once)
+	middleware.InitSecrets(jwtSecret, adminKey)
+
+	// ── Database ────────────────────────────────────────────────────────
 	db := database.Connect()
 	defer db.Close()
 
@@ -33,41 +50,56 @@ func main() {
 
 	go cleanExpiredSessions(db)
 
+	// ── Redis ───────────────────────────────────────────────────────────
 	log.Println("[PORTAL] Connecting to Redis...")
 	redis := cache.New()
 	defer redis.Close()
 	log.Println("[PORTAL] Redis connected")
 
+	// ── Hub ─────────────────────────────────────────────────────────────
 	wsHub := hub.New()
 
+	// ── Auth ────────────────────────────────────────────────────────────
 	authRepo := repository.NewAuthRepository(db)
-	authService := services.NewAuthService(authRepo)
+	emailSvc := services.NewEmailService()
+	authService := services.NewAuthService(authRepo, emailSvc, jwtSecret)
 	auth := handlers.NewAuth(wsHub, authService)
 
+	// ── Social ──────────────────────────────────────────────────────────
 	socialRepo := repository.NewSocialRepository(db)
 	notifRepo := repository.NewNotificationRepository(db)
 	socialService := services.NewSocialService(socialRepo, authRepo, notifRepo, redis)
 	social := handlers.NewSocial(wsHub, socialService)
 	notifHandler := handlers.NewNotification(notifRepo)
 
+	// ── Notícias ────────────────────────────────────────────────────────
 	noticiasRepo := repository.NewNoticiasRepository(db)
 	noticiasService := services.NewNoticiasService(noticiasRepo, redis)
 	noticias := handlers.NewNoticias(noticiasService)
 
+	// ── Sugestões ───────────────────────────────────────────────────────
 	sugestaoRepo := repository.NewSugestoesRepository(db)
 	sugestaoService := services.NewSugestoesService(sugestaoRepo, redis)
 	sugestoes := handlers.NewSugestoes(sugestaoService)
 
+	// ── Bus ─────────────────────────────────────────────────────────────
 	busRepo := repository.NewBusRepository(db)
 	busService := services.NewBusService(busRepo, redis)
 	bus := handlers.NewBus(busService)
 
+	// ── Galeria ─────────────────────────────────────────────────────────
 	galeriaRepo := repository.NewGaleriaRepository(db)
 	galeriaService := services.NewGaleriaService(galeriaRepo)
 	galeria := handlers.NewGaleria(galeriaService, socialRepo)
 
+	// ── Fiber App ───────────────────────────────────────────────────────
 	app := server.NewApp("portal")
 
+	// ═══════════════════════════════════════════════════════════════════
+	//  Routes
+	// ═══════════════════════════════════════════════════════════════════
+
+	// ── Auth routes ─────────────────────────────────────────────────────
 	authGroup := app.Group("/auth")
 	authGroup.Post("/register", limiter.New(limiter.Config{
 		Max:        5,
@@ -85,6 +117,14 @@ func main() {
 		},
 	}), auth.Login)
 
+	authGroup.Post("/forgot-password", limiter.New(limiter.Config{
+		Max:        3,
+		Expiration: 5 * time.Minute,
+		KeyGenerator: func(c *fiber.Ctx) string {
+			return c.IP()
+		},
+	}), auth.ForgotPassword)
+
 	authGroup.Post("/reset-password", limiter.New(limiter.Config{
 		Max:        5,
 		Expiration: 5 * time.Minute,
@@ -92,6 +132,10 @@ func main() {
 			return c.IP()
 		},
 	}), auth.ResetPassword)
+
+	// ── Google OAuth ────────────────────────────────────────────────────
+	authGroup.Get("/google", auth.GoogleLogin)
+	authGroup.Get("/google/callback", auth.GoogleCallback)
 
 	authGroup.Post("/refresh", auth.Refresh)
 	authGroup.Get("/session", auth.Session)
@@ -111,7 +155,7 @@ func main() {
 
 	app.Get("/internal/user/:uuid", auth.GetUserByUUID)
 
-	// ── Notícias REST (public read, admin write) ──
+	// ── Notícias REST (public read, admin write) ────────────────────────
 	noticiasGroup := app.Group("/noticias")
 	noticiasGroup.Get("/destaques", noticias.Destaques)
 	noticiasGroup.Get("/:id", noticias.BuscarPorID)
@@ -122,15 +166,14 @@ func main() {
 	noticiasAdmin.Put("/:id", noticias.Atualizar)
 	noticiasAdmin.Delete("/:id", noticias.Deletar)
 
-	// ── Sugestões REST (public read, auth write, admin edit/delete) ──
+	// ── Sugestões REST (public read, auth write, admin edit/delete) ─────
 	sugestoesGroup := app.Group("/sugestoes")
 	sugestoesGroup.Get("/", sugestoes.Listar)
 
-	// ── Social (Feed, Threads, Profiles) ──
+	// ── Social (Feed, Threads, Profiles) ────────────────────────────────
 	socialGroup := app.Group("/social")
 	socialGroup.Get("/feed", middleware.OptionalAuthMiddleware, social.Feed)
 	socialGroup.Get("/feed/:id", middleware.OptionalAuthMiddleware, social.Thread)
-	// profile: público mas injeta user_id se o token for enviado (necessário para /profile sem username)
 	socialGroup.Get("/profile/:username?", middleware.OptionalAuthMiddleware, social.Profile)
 
 	socialPriv := socialGroup.Group("", middleware.AuthMiddleware)
@@ -145,18 +188,18 @@ func main() {
 	sugestoesPriv.Post("/", sugestoes.Criar)
 
 	sugestoesAdmin := sugestoesGroup.Group("", middleware.AuthMiddleware, middleware.AdminMiddleware)
-	sugestoesAdmin.Delete("/:id", sugestoes.Deletar) // Admin can delete
-	sugestoesAdmin.Put("/:id", sugestoes.Atualizar)  // Admin can update
+	sugestoesAdmin.Delete("/:id", sugestoes.Deletar)
+	sugestoesAdmin.Put("/:id", sugestoes.Atualizar)
 
-	// ── Bus Reserva (High Performance) ──
+	// ── Bus Reserva (High Performance) ──────────────────────────────────
 	busGroup := app.Group("/bus")
-	busGroup.Get("/trips", bus.ListTrips)    // New: public trips listing
-	busGroup.Get("/:id/seats", bus.GetSeats) // Public read (fast)
+	busGroup.Get("/trips", bus.ListTrips)
+	busGroup.Get("/:id/seats", bus.GetSeats)
 
 	busAdmin := busGroup.Group("/trips", middleware.AuthMiddleware, middleware.AdminMiddleware)
-	busAdmin.Post("/", bus.CreateTrip)      // Admin can create a trip
-	busAdmin.Put("/:id", bus.UpdateTrip)    // Admin can update a trip
-	busAdmin.Delete("/:id", bus.DeleteTrip) // Admin can delete a trip
+	busAdmin.Post("/", bus.CreateTrip)
+	busAdmin.Put("/:id", bus.UpdateTrip)
+	busAdmin.Delete("/:id", bus.DeleteTrip)
 
 	busPriv := busGroup.Group("", middleware.AuthMiddleware)
 	busPriv.Post("/reserve", bus.Reserve)
@@ -169,14 +212,15 @@ func main() {
 	notifPriv.Get("/", notifHandler.GetNotifications)
 	notifPriv.Put("/read", notifHandler.MarkAsRead)
 
-	// ── Galeria (leitura pública, upload/delete autenticado) ──
+	// ── Galeria (leitura pública, upload/delete autenticado) ─────────────
 	galeriaGroup := app.Group("/galeria")
 	galeriaGroup.Get("/list", galeria.List)
 	galeriaPriv := galeriaGroup.Group("", middleware.AuthMiddleware)
 	galeriaPriv.Post("/upload", galeria.Upload)
 	galeriaPriv.Delete("/:id", galeria.Delete)
 
-	app.Use("/ws", parseWSToken)
+	// ── WebSocket ───────────────────────────────────────────────────────
+	app.Use("/ws", parseWSToken(jwtSecret))
 
 	app.Get("/ws", websocket.New(func(c *websocket.Conn) {
 		userID, _ := c.Locals("user_id").(int)
@@ -185,6 +229,7 @@ func main() {
 		wsHub.HandleClientConn(c, userID, userUUID, username)
 	}))
 
+	// ── Start ───────────────────────────────────────────────────────────
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8082"
@@ -199,51 +244,55 @@ func main() {
 	}
 }
 
-func parseWSToken(c *fiber.Ctx) error {
-	if !websocket.IsWebSocketUpgrade(c) {
-		return fiber.ErrUpgradeRequired
-	}
+// parseWSToken returns a Fiber handler that parses JWT from query or header.
+// The secret is captured via closure – no os.Getenv per request.
+func parseWSToken(jwtSecret string) fiber.Handler {
+	secretBytes := []byte(jwtSecret)
 
-	tokenStr := c.Query("token")
-	if tokenStr == "" {
-		authHeader := c.Get("Authorization")
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			tokenStr = authHeader[7:]
-		}
-	}
-
-	userID := 0
-	userUUID := ""
-	username := ""
-
-	if tokenStr != "" {
-		secret := os.Getenv("JWT_SECRET")
-		if secret == "" {
-			secret = "dev-secret-key-change-in-production"
+	return func(c *fiber.Ctx) error {
+		if !websocket.IsWebSocketUpgrade(c) {
+			return fiber.ErrUpgradeRequired
 		}
 
-		token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
-			return []byte(secret), nil
-		})
-
-		if err == nil && token.Valid {
-			claims := token.Claims.(*jwt.MapClaims)
-			if id, ok := (*claims)["user_id"].(float64); ok {
-				userID = int(id)
-			}
-			if uid, ok := (*claims)["uuid"].(string); ok {
-				userUUID = uid
-			}
-			if uname, ok := (*claims)["username"].(string); ok {
-				username = uname
+		tokenStr := c.Query("token")
+		if tokenStr == "" {
+			authHeader := c.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				tokenStr = authHeader[7:]
 			}
 		}
-	}
 
-	c.Locals("user_id", userID)
-	c.Locals("user_uuid", userUUID)
-	c.Locals("username", username)
-	return c.Next()
+		userID := 0
+		userUUID := ""
+		username := ""
+
+		if tokenStr != "" {
+			token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
+				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, fiber.ErrUnauthorized
+				}
+				return secretBytes, nil
+			})
+
+			if err == nil && token.Valid {
+				claims := token.Claims.(*jwt.MapClaims)
+				if id, ok := (*claims)["user_id"].(float64); ok {
+					userID = int(id)
+				}
+				if uid, ok := (*claims)["uuid"].(string); ok {
+					userUUID = uid
+				}
+				if uname, ok := (*claims)["username"].(string); ok {
+					username = uname
+				}
+			}
+		}
+
+		c.Locals("user_id", userID)
+		c.Locals("user_uuid", userUUID)
+		c.Locals("username", username)
+		return c.Next()
+	}
 }
 
 func cleanExpiredSessions(db *sql.DB) {
@@ -252,5 +301,6 @@ func cleanExpiredSessions(db *sql.DB) {
 
 	for range ticker.C {
 		db.Exec(`DELETE FROM sessions WHERE expires_at < NOW()`)
+		db.Exec(`DELETE FROM password_reset_tokens WHERE expires_at < NOW()`)
 	}
 }

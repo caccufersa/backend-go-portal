@@ -46,18 +46,15 @@ func (s *galeriaService) Upload(fileData []byte, fileName string, userID int, au
 		return models.GaleriaItem{}, fmt.Errorf("cloudinary não configurado: defina CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY e CLOUDINARY_API_SECRET")
 	}
 
-	// Parâmetros para a assinatura Cloudinary
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	folder := "galeria"
 
-	// Gerar assinatura HMAC-SHA1
 	params := map[string]string{
 		"folder":    folder,
 		"timestamp": timestamp,
 	}
 	sig := cloudinarySign(params, apiSecret)
 
-	// Montar multipart form
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 

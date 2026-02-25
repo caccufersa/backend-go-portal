@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"time"
 
+	"cacc/pkg/apperror"
 	"cacc/pkg/hub"
 	"cacc/pkg/models"
 	"cacc/pkg/services"
@@ -17,11 +20,25 @@ type AuthHandler struct {
 }
 
 func NewAuth(h *hub.Hub, service services.AuthService) *AuthHandler {
-	return &AuthHandler{
-		hub:     h,
-		service: service,
-	}
+	return &AuthHandler{hub: h, service: service}
 }
+
+// respondErr maps apperror.AppError → HTTP status + JSON erro field.
+func respondErr(c *fiber.Ctx, err error) error {
+	if ae, ok := err.(*apperror.AppError); ok {
+		return c.Status(int(ae.Code)).JSON(fiber.Map{"erro": ae.Message})
+	}
+	return c.Status(500).JSON(fiber.Map{"erro": "Erro interno"})
+}
+
+// generateOAuthState makes a random 16-byte hex string for CSRF protection.
+func generateOAuthState() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// ─── Register ────────────────────────────────────────────────────────────────
 
 func (ah *AuthHandler) Register(c *fiber.Ctx) error {
 	var req models.RegisterRequest
@@ -31,17 +48,7 @@ func (ah *AuthHandler) Register(c *fiber.Ctx) error {
 
 	res, err := ah.service.Register(req, c.Get("User-Agent"), c.IP())
 	if err != nil {
-		if err.Error() == "username já existe" {
-			return c.Status(409).JSON(fiber.Map{"erro": err.Error()})
-		}
-		if err.Error() == "username deve ter ao menos 3 caracteres" ||
-			err.Error() == "username muito longo (max 30)" ||
-			err.Error() == "username só pode ter letras, números, _ e -" ||
-			err.Error() == "senha deve ter ao menos 8 caracteres" ||
-			err.Error() == "senha muito longa" {
-			return c.Status(400).JSON(fiber.Map{"erro": err.Error()})
-		}
-		return c.Status(500).JSON(fiber.Map{"erro": err.Error()})
+		return respondErr(c, err)
 	}
 
 	go ah.hub.Broadcast("user_registered", "auth", fiber.Map{
@@ -52,6 +59,8 @@ func (ah *AuthHandler) Register(c *fiber.Ctx) error {
 	return c.Status(201).JSON(res)
 }
 
+// ─── Login ───────────────────────────────────────────────────────────────────
+
 func (ah *AuthHandler) Login(c *fiber.Ctx) error {
 	var req models.LoginRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -60,13 +69,7 @@ func (ah *AuthHandler) Login(c *fiber.Ctx) error {
 
 	res, err := ah.service.Login(req, c.Get("User-Agent"), c.IP())
 	if err != nil {
-		if err.Error() == "username e senha obrigatórios" {
-			return c.Status(400).JSON(fiber.Map{"erro": err.Error()})
-		}
-		if err.Error() == "username ou senha incorretos" {
-			return c.Status(401).JSON(fiber.Map{"erro": err.Error()})
-		}
-		return c.Status(500).JSON(fiber.Map{"erro": "Erro interno"})
+		return respondErr(c, err)
 	}
 
 	go ah.hub.Broadcast("user_login", "auth", fiber.Map{
@@ -77,6 +80,25 @@ func (ah *AuthHandler) Login(c *fiber.Ctx) error {
 	return c.Status(200).JSON(res)
 }
 
+// ─── Forgot Password ─────────────────────────────────────────────────────────
+
+// POST /auth/forgot-password  body: { "email": "user@example.com" }
+func (ah *AuthHandler) ForgotPassword(c *fiber.Ctx) error {
+	var req models.ForgotPasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
+	}
+
+	// Always return 200 – never reveal whether the e-mail exists (enumeration protection)
+	_ = ah.service.ForgotPassword(req.Email)
+	return c.JSON(fiber.Map{
+		"message": "Se uma conta com esse e-mail existir, você receberá um link de redefinição em breve.",
+	})
+}
+
+// ─── Reset Password ──────────────────────────────────────────────────────────
+
+// POST /auth/reset-password  body: { "token": "...", "new_password": "..." }
 func (ah *AuthHandler) ResetPassword(c *fiber.Ctx) error {
 	var req models.ResetPasswordRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -84,14 +106,74 @@ func (ah *AuthHandler) ResetPassword(c *fiber.Ctx) error {
 	}
 
 	if err := ah.service.ResetPassword(req); err != nil {
-		if err.Error() == "todos os campos são obrigatórios" || err.Error() == "senha deve ter ao menos 8 caracteres" || err.Error() == "código de recuperação inválido" || err.Error() == "dados inválidos" {
-			return c.Status(400).JSON(fiber.Map{"erro": err.Error()})
-		}
-		return c.Status(500).JSON(fiber.Map{"erro": "Erro interno"})
+		return respondErr(c, err)
 	}
 
 	return c.JSON(fiber.Map{"message": "Senha redefinida com sucesso. Faça login novamente."})
 }
+
+// ─── Google OAuth ─────────────────────────────────────────────────────────────
+
+// GET /auth/google → redirects to Google consent screen
+func (ah *AuthHandler) GoogleLogin(c *fiber.Ctx) error {
+	state := generateOAuthState()
+	secure := os.Getenv("GO_ENV") == "production"
+	c.Cookie(&fiber.Cookie{
+		Name:     "oauth_state",
+		Value:    state,
+		Expires:  time.Now().Add(10 * time.Minute),
+		HTTPOnly: true,
+		Secure:   secure,
+		SameSite: "Lax",
+		Path:     "/",
+	})
+	url := ah.service.GoogleOAuthURL(state)
+	return c.Redirect(url, 302)
+}
+
+// GET /auth/google/callback?code=...&state=...
+func (ah *AuthHandler) GoogleCallback(c *fiber.Ctx) error {
+	// CSRF state check
+	cookieState := c.Cookies("oauth_state")
+	queryState := c.Query("state")
+	if cookieState == "" || cookieState != queryState {
+		return c.Status(400).JSON(fiber.Map{"erro": "state inválido (proteção CSRF)"})
+	}
+
+	code := c.Query("code")
+	if code == "" {
+		return c.Status(400).JSON(fiber.Map{"erro": "código OAuth ausente"})
+	}
+
+	res, err := ah.service.GoogleCallback(code, c.Get("User-Agent"), c.IP())
+	if err != nil {
+		return respondErr(c, err)
+	}
+
+	// Clear state cookie
+	c.Cookie(&fiber.Cookie{
+		Name:    "oauth_state",
+		Value:   "",
+		Expires: time.Now().Add(-1 * time.Hour),
+		Path:    "/",
+	})
+
+	go ah.hub.Broadcast("user_login", "auth", fiber.Map{
+		"user_id": res.User.ID, "uuid": res.User.UUID, "username": res.User.Username,
+	})
+
+	ah.setRefreshCookie(c, res.RefreshToken, time.Now().Add(30*24*time.Hour))
+
+	// Redirect back to frontend with the access token in the URL fragment.
+	// The frontend reads it once and discards the URL.
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:3000"
+	}
+	return c.Redirect(frontendURL+"/auth/callback#access_token="+res.AccessToken, 302)
+}
+
+// ─── Refresh ─────────────────────────────────────────────────────────────────
 
 func (ah *AuthHandler) Refresh(c *fiber.Ctx) error {
 	var req struct {
@@ -104,18 +186,14 @@ func (ah *AuthHandler) Refresh(c *fiber.Ctx) error {
 
 	res, err := ah.service.Refresh(req.RefreshToken)
 	if err != nil {
-		if err.Error() == "refresh token não informado" {
-			return c.Status(400).JSON(fiber.Map{"erro": err.Error()})
-		}
-		if err.Error() == "sessão inválida ou expirada" || err.Error() == "sessão expirada, faça login novamente" {
-			return c.Status(401).JSON(fiber.Map{"erro": err.Error()})
-		}
-		return c.Status(500).JSON(fiber.Map{"erro": "Erro interno"})
+		return respondErr(c, err)
 	}
 
 	ah.setRefreshCookie(c, res.RefreshToken, time.Now().Add(30*24*time.Hour))
 	return c.JSON(res)
 }
+
+// ─── Session ─────────────────────────────────────────────────────────────────
 
 func (ah *AuthHandler) Session(c *fiber.Ctx) error {
 	authHeader := c.Get("Authorization")
@@ -128,19 +206,17 @@ func (ah *AuthHandler) Session(c *fiber.Ctx) error {
 
 	res, err := ah.service.Session(tokenStr, refreshToken)
 	if err != nil {
-		if err.Error() == "sessão expirada" {
+		if ae, ok := err.(*apperror.AppError); ok && ae.Code == apperror.ErrUnauthorized {
 			ah.clearRefreshCookie(c)
-			return c.Status(401).JSON(fiber.Map{"authenticated": false, "erro": err.Error()})
+			return c.Status(401).JSON(fiber.Map{"authenticated": false, "erro": ae.Message})
 		}
-		return c.Status(401).JSON(fiber.Map{"authenticated": false, "erro": err.Error()})
+		return c.Status(401).JSON(fiber.Map{"authenticated": false, "erro": "sessão inválida"})
 	}
 
-	// Update cookie if new token was generated
 	if res.RefreshToken != "" {
 		ah.setRefreshCookie(c, res.RefreshToken, time.Now().Add(30*24*time.Hour))
 	}
 
-	// Dynamic response mapped based on Session return
 	if res.AccessToken != "" {
 		return c.JSON(fiber.Map{
 			"authenticated": true,
@@ -152,6 +228,8 @@ func (ah *AuthHandler) Session(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"authenticated": true, "user": res.User})
 }
 
+// ─── Me ──────────────────────────────────────────────────────────────────────
+
 func (ah *AuthHandler) Me(c *fiber.Ctx) error {
 	userID, ok := c.Locals("user_id").(int)
 	if !ok || userID <= 0 {
@@ -160,11 +238,13 @@ func (ah *AuthHandler) Me(c *fiber.Ctx) error {
 
 	user, err := ah.service.Me(userID)
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"erro": err.Error()})
+		return respondErr(c, err)
 	}
 
 	return c.JSON(fiber.Map{"user": user})
 }
+
+// ─── Logout ──────────────────────────────────────────────────────────────────
 
 func (ah *AuthHandler) Logout(c *fiber.Ctx) error {
 	refreshToken := c.Cookies("refresh_token")
@@ -172,15 +252,12 @@ func (ah *AuthHandler) Logout(c *fiber.Ctx) error {
 		RefreshToken string `json:"refresh_token"`
 	}
 	_ = c.BodyParser(&req)
-
-	tokenToClear := refreshToken
 	if req.RefreshToken != "" {
-		tokenToClear = req.RefreshToken
+		refreshToken = req.RefreshToken
 	}
 
 	userID, _ := c.Locals("user_id").(int)
-
-	ah.service.Logout(tokenToClear, userID)
+	ah.service.Logout(refreshToken, userID)
 
 	if userID > 0 {
 		userUUID, _ := c.Locals("user_uuid").(string)
@@ -204,6 +281,8 @@ func (ah *AuthHandler) LogoutAll(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "ok", "message": "Todas as sessões encerradas"})
 }
 
+// ─── Sessions ────────────────────────────────────────────────────────────────
+
 func (ah *AuthHandler) Sessions(c *fiber.Ctx) error {
 	userID, ok := c.Locals("user_id").(int)
 	if !ok || userID <= 0 {
@@ -226,12 +305,14 @@ func (ah *AuthHandler) Sessions(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"sessions": mappedSessions})
 }
 
+// ─── GetUserByUUID ───────────────────────────────────────────────────────────
+
 func (ah *AuthHandler) GetUserByUUID(c *fiber.Ctx) error {
 	uuid := c.Params("uuid")
 
 	user, err := ah.service.GetUserByUUID(uuid)
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"erro": err.Error()})
+		return respondErr(c, err)
 	}
 
 	return c.JSON(fiber.Map{
@@ -241,6 +322,8 @@ func (ah *AuthHandler) GetUserByUUID(c *fiber.Ctx) error {
 		"created_at": user.CreatedAt,
 	})
 }
+
+// ─── Cookie helpers ──────────────────────────────────────────────────────────
 
 func (ah *AuthHandler) setRefreshCookie(c *fiber.Ctx, token string, expires time.Time) {
 	secure := os.Getenv("GO_ENV") == "production"
