@@ -10,9 +10,10 @@ import (
 
 // googleProfile holds the fields we care about from Google's userinfo endpoint.
 type googleProfile struct {
-	Sub   string `json:"sub"` // stable Google user ID
-	Email string `json:"email"`
-	Name  string `json:"name"`
+	Sub     string `json:"sub"` // stable Google user ID
+	Email   string `json:"email"`
+	Name    string `json:"name"`
+	Picture string `json:"picture"` // profile photo URL
 }
 
 // callGoogleUserinfo uses an OAuth2 access token to fetch the user profile

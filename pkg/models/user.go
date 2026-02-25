@@ -3,12 +3,14 @@ package models
 import "time"
 
 type User struct {
-	ID        int       `json:"id"`
-	UUID      string    `json:"uuid"`
-	Username  string    `json:"username"`
-	Email     string    `json:"email,omitempty"`
-	GoogleID  string    `json:"-"` // never expose
-	CreatedAt time.Time `json:"created_at"`
+	ID          int       `json:"id"`
+	UUID        string    `json:"uuid"`
+	Username    string    `json:"username"`
+	Email       string    `json:"email,omitempty"`
+	GoogleID    string    `json:"-"` // never expose
+	AvatarURL   string    `json:"avatar_url,omitempty"`
+	DisplayName string    `json:"display_name,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type RegisterRequest struct {

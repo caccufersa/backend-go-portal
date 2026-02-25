@@ -282,7 +282,7 @@ func (s *authService) GoogleCallback(code, userAgent, ip string) (models.AuthRes
 		return models.AuthResponse{}, apperror.Unauthorized("falha ao obter perfil do Google")
 	}
 
-	user, err := s.repo.GetOrCreateGoogleUser(profile.Sub, profile.Email, profile.Name)
+	user, err := s.repo.GetOrCreateGoogleUser(profile.Sub, profile.Email, profile.Name, profile.Picture)
 	if err != nil {
 		return models.AuthResponse{}, apperror.Internal("erro ao autenticar com Google")
 	}

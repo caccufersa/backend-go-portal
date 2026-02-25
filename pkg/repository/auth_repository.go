@@ -17,7 +17,7 @@ type AuthRepository interface {
 	UpdatePassword(userID int, newHashedPassword string) error
 
 	// Google OAuth
-	GetOrCreateGoogleUser(googleID, email, username string) (models.User, error)
+	GetOrCreateGoogleUser(googleID, email, username, picture string) (models.User, error)
 
 	// Password reset tokens
 	CreatePasswordResetToken(userID int, tokenHash string, expiresAt time.Time) error
@@ -98,24 +98,44 @@ func (r *authRepository) UpdatePassword(userID int, newHashedPassword string) er
 
 func (r *authRepository) GetUserByID(id int) (models.User, error) {
 	var user models.User
-	var email sql.NullString
+	var email, avatar, displayName sql.NullString
 	err := r.db.QueryRow(
-		`SELECT id, uuid, username, COALESCE(email,''), created_at FROM users WHERE id = $1`, id,
-	).Scan(&user.ID, &user.UUID, &user.Username, &email, &user.CreatedAt)
+		`SELECT u.id, u.uuid, u.username, COALESCE(u.email,''), u.created_at,
+		        COALESCE(sp.avatar_url,''), COALESCE(sp.display_name,'')
+		 FROM users u
+		 LEFT JOIN social_profiles sp ON sp.user_id = u.id
+		 WHERE u.id = $1`, id,
+	).Scan(&user.ID, &user.UUID, &user.Username, &email, &user.CreatedAt, &avatar, &displayName)
 	if email.Valid {
 		user.Email = email.String
+	}
+	if avatar.Valid {
+		user.AvatarURL = avatar.String
+	}
+	if displayName.Valid {
+		user.DisplayName = displayName.String
 	}
 	return user, err
 }
 
 func (r *authRepository) GetUserByUUID(uuid string) (models.User, error) {
 	var user models.User
-	var email sql.NullString
+	var email, avatar, displayName sql.NullString
 	err := r.db.QueryRow(
-		`SELECT id, uuid, username, COALESCE(email,''), created_at FROM users WHERE uuid = $1`, uuid,
-	).Scan(&user.ID, &user.UUID, &user.Username, &email, &user.CreatedAt)
+		`SELECT u.id, u.uuid, u.username, COALESCE(u.email,''), u.created_at,
+		        COALESCE(sp.avatar_url,''), COALESCE(sp.display_name,'')
+		 FROM users u
+		 LEFT JOIN social_profiles sp ON sp.user_id = u.id
+		 WHERE u.uuid = $1`, uuid,
+	).Scan(&user.ID, &user.UUID, &user.Username, &email, &user.CreatedAt, &avatar, &displayName)
 	if email.Valid {
 		user.Email = email.String
+	}
+	if avatar.Valid {
+		user.AvatarURL = avatar.String
+	}
+	if displayName.Valid {
+		user.DisplayName = displayName.String
 	}
 	return user, err
 }
@@ -123,7 +143,8 @@ func (r *authRepository) GetUserByUUID(uuid string) (models.User, error) {
 // ─── Google OAuth ─────────────────────────────────────────────────────────────
 
 // GetOrCreateGoogleUser finds a user by google_id or email, creating one if needed.
-func (r *authRepository) GetOrCreateGoogleUser(googleID, email, username string) (models.User, error) {
+// It also upserts the social_profiles row with the Google avatar and display name.
+func (r *authRepository) GetOrCreateGoogleUser(googleID, email, username, picture string) (models.User, error) {
 	var user models.User
 	var emailOut sql.NullString
 
@@ -137,6 +158,9 @@ func (r *authRepository) GetOrCreateGoogleUser(googleID, email, username string)
 		if emailOut.Valid {
 			user.Email = emailOut.String
 		}
+		r.upsertSocialProfile(user.ID, username, picture)
+		user.AvatarURL = picture
+		user.DisplayName = username
 		return user, nil
 	}
 
@@ -151,6 +175,9 @@ func (r *authRepository) GetOrCreateGoogleUser(googleID, email, username string)
 		if emailOut.Valid {
 			user.Email = emailOut.String
 		}
+		r.upsertSocialProfile(user.ID, username, picture)
+		user.AvatarURL = picture
+		user.DisplayName = username
 		return user, nil
 	}
 
@@ -167,7 +194,26 @@ func (r *authRepository) GetOrCreateGoogleUser(googleID, email, username string)
 	if emailOut.Valid {
 		user.Email = emailOut.String
 	}
+	if err == nil {
+		r.upsertSocialProfile(user.ID, username, picture)
+		user.AvatarURL = picture
+		user.DisplayName = username
+	}
 	return user, err
+}
+
+// upsertSocialProfile creates or updates the social profile with Google avatar/name.
+// Only updates avatar_url if the user doesn't already have one (preserves custom avatars).
+func (r *authRepository) upsertSocialProfile(userID int, displayName, avatarURL string) {
+	r.db.Exec(
+		`INSERT INTO social_profiles (user_id, display_name, avatar_url)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (user_id) DO UPDATE
+		   SET display_name = COALESCE(NULLIF(social_profiles.display_name,''), EXCLUDED.display_name),
+		       avatar_url   = COALESCE(NULLIF(social_profiles.avatar_url,''), EXCLUDED.avatar_url),
+		       updated_at   = NOW()`,
+		userID, displayName, avatarURL,
+	)
 }
 
 // sanitizeUsername keeps only safe characters and trims length.
@@ -235,15 +281,28 @@ func (r *authRepository) CreateSession(userID int, tokenHash, userAgent, ip stri
 func (r *authRepository) GetSessionByToken(tokenHash string) (models.Session, models.User, error) {
 	var session models.Session
 	var user models.User
-	var email sql.NullString
+	var email, avatar, displayName sql.NullString
 	err := r.db.QueryRow(
-		`SELECT s.id, s.user_id, s.expires_at, u.uuid, u.username, COALESCE(u.email,''), u.created_at
-		 FROM sessions s JOIN users u ON u.id = s.user_id
+		`SELECT s.id, s.user_id, s.expires_at, 
+		        u.uuid, u.username, COALESCE(u.email,''), u.created_at,
+		        COALESCE(sp.avatar_url,''), COALESCE(sp.display_name,'')
+		 FROM sessions s 
+		 JOIN users u ON u.id = s.user_id
+		 LEFT JOIN social_profiles sp ON sp.user_id = u.id
 		 WHERE s.refresh_token = $1`, tokenHash,
-	).Scan(&session.ID, &session.UserID, &session.ExpiresAt, &user.UUID, &user.Username, &email, &user.CreatedAt)
+	).Scan(&session.ID, &session.UserID, &session.ExpiresAt,
+		&user.UUID, &user.Username, &email, &user.CreatedAt,
+		&avatar, &displayName)
+
 	user.ID = session.UserID
 	if email.Valid {
 		user.Email = email.String
+	}
+	if avatar.Valid {
+		user.AvatarURL = avatar.String
+	}
+	if displayName.Valid {
+		user.DisplayName = displayName.String
 	}
 	return session, user, err
 }
