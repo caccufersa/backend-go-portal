@@ -26,11 +26,12 @@ func (sg *SugestoesHandler) Listar(c *fiber.Ctx) error {
 	return c.JSON(lista)
 }
 
-// POST /sugestoes (auth required)
+// POST /sugestoes
 func (sg *SugestoesHandler) Criar(c *fiber.Ctx) error {
 	var req struct {
 		Texto     string `json:"texto"`
 		Categoria string `json:"categoria"`
+		Anonimo   bool   `json:"anonimo"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{"erro": "JSON inválido"})
@@ -44,9 +45,14 @@ func (sg *SugestoesHandler) Criar(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"erro": "Texto muito longo (max 2000)"})
 	}
 
-	username, _ := c.Locals("username").(string)
-	if username == "" {
+	var username string
+	if req.Anonimo {
 		username = "Anônimo"
+	} else {
+		username, _ = c.Locals("username").(string)
+		if username == "" {
+			username = "Anônimo"
+		}
 	}
 
 	categoria := strings.TrimSpace(req.Categoria)

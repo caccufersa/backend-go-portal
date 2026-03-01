@@ -169,7 +169,7 @@ func (h *BusHandler) SetContact(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid Body"})
 	}
 
-	if err := h.service.SetUserContact(userID, req.Phone); err != nil {
+	if err := h.service.SetUserContact(userID, req.Phone, req.Matricula); err != nil {
 		return c.Status(400).JSON(fiber.Map{"erro": err.Error()})
 	}
 
@@ -182,10 +182,10 @@ func (h *BusHandler) GetContact(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
 	}
 
-	phone, err := h.service.GetUserContact(userID)
+	phone, matricula, err := h.service.GetUserContact(userID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"erro": "Erro ao buscar contato"})
 	}
 
-	return c.JSON(fiber.Map{"phone": phone})
+	return c.JSON(fiber.Map{"phone": phone, "matricula": matricula})
 }

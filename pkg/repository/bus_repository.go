@@ -16,8 +16,8 @@ type BusRepository interface {
 	MyReservations(userID int) ([]models.MyReservation, error)
 	CancelSeat(userID int, tripID string, seatNumber int) (int, error)
 
-	SetUserContact(userID int, phone int64) error
-	GetUserContact(userID int) (int64, error)
+	SetUserContact(userID int, phone int64, matricula string) error
+	GetUserContact(userID int) (int64, string, error)
 }
 
 type busRepository struct {
@@ -220,21 +220,22 @@ func (r *busRepository) CancelSeat(userID int, tripID string, seatNumber int) (i
 	return seat, err
 }
 
-func (r *busRepository) SetUserContact(userID int, phone int64) error {
+func (r *busRepository) SetUserContact(userID int, phone int64, matricula string) error {
 	_, err := r.db.Exec(`
-		INSERT INTO bus_profiles (user_id, phone, updated_at)
-		VALUES ($1, $2, NOW())
+		INSERT INTO bus_profiles (user_id, phone, matricula, updated_at)
+		VALUES ($1, $2, $3, NOW())
 		ON CONFLICT (user_id) DO UPDATE 
-		SET phone = EXCLUDED.phone, updated_at = NOW()
-	`, userID, phone)
+		SET phone = EXCLUDED.phone, matricula = EXCLUDED.matricula, updated_at = NOW()
+	`, userID, phone, matricula)
 	return err
 }
 
-func (r *busRepository) GetUserContact(userID int) (int64, error) {
+func (r *busRepository) GetUserContact(userID int) (int64, string, error) {
 	var phone int64
-	err := r.db.QueryRow(`SELECT phone FROM bus_profiles WHERE user_id = $1`, userID).Scan(&phone)
+	var matricula string
+	err := r.db.QueryRow(`SELECT phone, COALESCE(matricula, '') FROM bus_profiles WHERE user_id = $1`, userID).Scan(&phone, &matricula)
 	if err == sql.ErrNoRows {
-		return 0, nil
+		return 0, "", nil
 	}
-	return phone, err
+	return phone, matricula, err
 }

@@ -20,8 +20,8 @@ type BusService interface {
 	MyReservations(userID int) ([]models.MyReservation, error)
 	Cancel(userID int, tripID string, seatNumber int) (int, error)
 
-	SetUserContact(userID int, phone int64) error
-	GetUserContact(userID int) (int64, error)
+	SetUserContact(userID int, phone int64, matricula string) error
+	GetUserContact(userID int) (int64, string, error)
 }
 
 type busService struct {
@@ -131,14 +131,18 @@ func (s *busService) Cancel(userID int, tripID string, seatNumber int) (int, err
 	return seat, err
 }
 
-func (s *busService) SetUserContact(userID int, phone int64) error {
+func (s *busService) SetUserContact(userID int, phone int64, matricula string) error {
 	if phone <= 0 {
 		return fmt.Errorf("telefone inválido, deve conter apenas dígitos e ser maior que 0")
 	}
+	matricula = strings.TrimSpace(matricula)
+	if matricula == "" {
+		return fmt.Errorf("matrícula é obrigatória")
+	}
 
-	return s.repo.SetUserContact(userID, phone)
+	return s.repo.SetUserContact(userID, phone, matricula)
 }
 
-func (s *busService) GetUserContact(userID int) (int64, error) {
+func (s *busService) GetUserContact(userID int) (int64, string, error) {
 	return s.repo.GetUserContact(userID)
 }

@@ -184,8 +184,7 @@ func main() {
 	socialPriv.Delete("/feed/:id/like", social.UnlikePost)
 	socialPriv.Delete("/feed/:id", social.DeletePost)
 
-	sugestoesPriv := sugestoesGroup.Group("", middleware.AuthMiddleware)
-	sugestoesPriv.Post("/", sugestoes.Criar)
+	sugestoesGroup.Post("/", middleware.OptionalAuthMiddleware, sugestoes.Criar)
 
 	sugestoesAdmin := sugestoesGroup.Group("", middleware.AuthMiddleware, middleware.AdminMiddleware)
 	sugestoesAdmin.Delete("/:id", sugestoes.Deletar)

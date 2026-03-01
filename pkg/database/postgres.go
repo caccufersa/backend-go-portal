@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS bus_seats (
 CREATE TABLE IF NOT EXISTS bus_profiles (
 	user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
 	phone BIGINT NOT NULL,
+	matricula TEXT,
 	updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -242,6 +243,36 @@ ON CONFLICT DO NOTHING;
 INSERT INTO bus_trips (id, name, description, total_seats) 
 VALUES ('t2', 'Viagem Padrão 2', 'Descrição da viagem 2', 44)
 ON CONFLICT DO NOTHING;
+
+INSERT INTO bus_trips (id, name, description, departure_time, total_seats) 
+VALUES ('dataprev-natal', 'Viagem DATAPREV - Natal', 'Viagem para o DATAPREV em Natal/RN', '2026-03-10 07:00:00', 44)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO bus_seats (trip_id, seat_number) 
+ SELECT 'dataprev-natal', generate_series(1, 44)
+ WHERE NOT EXISTS (SELECT 1 FROM bus_seats WHERE trip_id = 'dataprev-natal');
+
+ALTER TABLE bus_profiles ADD COLUMN IF NOT EXISTS matricula TEXT;
+
+INSERT INTO noticias (titulo, conteudo, resumo, author, categoria, destaque, tags)
+SELECT
+  'Lançamento do Novo Portal CACC',
+  'O novo Portal do CACC está oficialmente no ar! A plataforma foi desenvolvida com tecnologias modernas como Golang no backend e Next.js no frontend, trazendo uma experiência mais rápida, segura e intuitiva para todos os colaboradores.
+
+Entre as novidades estão:
+- Sistema de reserva de ônibus com escolha de assento em tempo real
+- Ouvidoria com possibilidade de envio anônimo
+- Feed social integrado para comunicação interna
+- Galeria de fotos colaborativa
+- Notificações em tempo real via WebSocket
+
+Acesse agora e explore todas as funcionalidades!',
+  'O novo Portal CACC está no ar com reserva de ônibus, ouvidoria anônima, feed social e muito mais.',
+  'Administração',
+  'Tecnologia',
+  true,
+  ARRAY['portal', 'lançamento', 'tecnologia']
+WHERE NOT EXISTS (SELECT 1 FROM noticias WHERE titulo = 'Lançamento do Novo Portal CACC');
 `
 	_, err := db.Exec(schema)
 	if err != nil {

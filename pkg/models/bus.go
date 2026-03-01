@@ -48,5 +48,6 @@ type TripUpdateRequest struct {
 }
 
 type BusProfile struct {
-	Phone int64 `json:"phone"`
+	Phone     int64  `json:"phone"`
+	Matricula string `json:"matricula"`
 }
