@@ -71,7 +71,7 @@ func NewEmailService() EmailService {
 		svc.resendAPIKey = os.Getenv("RESEND_API_KEY")
 		svc.resendFrom = os.Getenv("RESEND_FROM")
 		if svc.resendFrom == "" {
-			svc.resendFrom = fmt.Sprintf("%s <onboarding@resend.dev>", appName)
+			svc.resendFrom = fmt.Sprintf("%s <noreply@capcom.page>", appName)
 		}
 	}
 
