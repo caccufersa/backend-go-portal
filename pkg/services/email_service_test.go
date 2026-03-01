@@ -15,6 +15,7 @@ import (
 // newTestEmailService cria um emailService com valores controlados pelo teste.
 func newTestEmailService(host, port, user, pass, from, appName string) *emailService {
 	return &emailService{
+		provider: "smtp",
 		host:     host,
 		port:     port,
 		username: user,
@@ -28,36 +29,27 @@ func newTestEmailService(host, port, user, pass, from, appName string) *emailSer
 // Testes unitários (sem conexão SMTP real)
 // ---------------------------------------------------------------------------
 
-// TestNewEmailService_Defaults verifica que variáveis de ambiente omitidas
-// assumem os valores padrão corretos.
-func TestNewEmailService_Defaults(t *testing.T) {
-	// Limpa variáveis que podem herdar do ambiente de CI
-	os.Unsetenv("SMTP_HOST")
-	os.Unsetenv("SMTP_PORT")
-	os.Unsetenv("SMTP_FROM")
+// TestNewEmailService_DefaultsResend verifica que sem EMAIL_PROVIDER,
+// o padrão é Resend.
+func TestNewEmailService_DefaultsResend(t *testing.T) {
+	os.Unsetenv("EMAIL_PROVIDER")
+	os.Unsetenv("RESEND_API_KEY")
+	os.Unsetenv("RESEND_FROM")
 	os.Unsetenv("APP_NAME")
-	os.Unsetenv("SMTP_USERNAME")
-	os.Unsetenv("SMTP_PASSWORD")
 
 	svc := NewEmailService().(*emailService)
 
-	if svc.host != "smtp.gmail.com" {
-		t.Errorf("host padrão esperado 'smtp.gmail.com', obteve '%s'", svc.host)
-	}
-	if svc.port != "587" {
-		t.Errorf("port padrão esperado '587', obteve '%s'", svc.port)
+	if svc.provider != "resend" {
+		t.Errorf("provider padrão esperado 'resend', obteve '%s'", svc.provider)
 	}
 	if svc.appName != "CACC Portal" {
 		t.Errorf("appName padrão esperado 'CACC Portal', obteve '%s'", svc.appName)
 	}
-	// from deve ser igual a username quando SMTP_FROM não está setado
-	if svc.from != svc.username {
-		t.Errorf("from deveria ser igual a username quando SMTP_FROM está vazio")
-	}
 }
 
-// TestNewEmailService_EnvVars verifica que as variáveis de ambiente são lidas.
-func TestNewEmailService_EnvVars(t *testing.T) {
+// TestNewEmailService_SMTP verifica que EMAIL_PROVIDER=smtp usa SMTP.
+func TestNewEmailService_SMTP(t *testing.T) {
+	os.Setenv("EMAIL_PROVIDER", "smtp")
 	os.Setenv("SMTP_HOST", "smtp.example.com")
 	os.Setenv("SMTP_PORT", "465")
 	os.Setenv("SMTP_USERNAME", "user@example.com")
@@ -65,6 +57,7 @@ func TestNewEmailService_EnvVars(t *testing.T) {
 	os.Setenv("SMTP_FROM", "noreply@example.com")
 	os.Setenv("APP_NAME", "Meu Portal")
 	defer func() {
+		os.Unsetenv("EMAIL_PROVIDER")
 		os.Unsetenv("SMTP_HOST")
 		os.Unsetenv("SMTP_PORT")
 		os.Unsetenv("SMTP_USERNAME")
@@ -74,6 +67,10 @@ func TestNewEmailService_EnvVars(t *testing.T) {
 	}()
 
 	svc := NewEmailService().(*emailService)
+
+	if svc.provider != "smtp" {
+		t.Errorf("provider esperado 'smtp', obteve '%s'", svc.provider)
+	}
 
 	checks := map[string][2]string{
 		"host":     {"smtp.example.com", svc.host},
@@ -90,9 +87,32 @@ func TestNewEmailService_EnvVars(t *testing.T) {
 	}
 }
 
+// TestNewEmailService_Resend verifica que as variáveis Resend são lidas.
+func TestNewEmailService_Resend(t *testing.T) {
+	os.Setenv("EMAIL_PROVIDER", "resend")
+	os.Setenv("RESEND_API_KEY", "re_test_123")
+	os.Setenv("RESEND_FROM", "Portal <noreply@meudominio.com>")
+	os.Setenv("APP_NAME", "Meu Portal")
+	defer func() {
+		os.Unsetenv("EMAIL_PROVIDER")
+		os.Unsetenv("RESEND_API_KEY")
+		os.Unsetenv("RESEND_FROM")
+		os.Unsetenv("APP_NAME")
+	}()
+
+	svc := NewEmailService().(*emailService)
+
+	if svc.resendAPIKey != "re_test_123" {
+		t.Errorf("resendAPIKey esperado 're_test_123', obteve '%s'", svc.resendAPIKey)
+	}
+	if svc.resendFrom != "Portal <noreply@meudominio.com>" {
+		t.Errorf("resendFrom inesperado: '%s'", svc.resendFrom)
+	}
+}
+
 // TestSendPasswordReset_NoCredentials garante que o método retorna erro
 // imediatamente quando as credenciais SMTP não estão configuradas.
-func TestSendPasswordReset_NoCredentials(t *testing.T) {
+func TestSendPasswordReset_NoCredentials_SMTP(t *testing.T) {
 	svc := newTestEmailService("smtp.gmail.com", "587", "", "", "", "Portal")
 
 	err := svc.SendPasswordReset("dest@example.com", "João", "https://example.com/reset")
@@ -100,6 +120,23 @@ func TestSendPasswordReset_NoCredentials(t *testing.T) {
 		t.Fatal("esperava erro quando username/password estão vazios")
 	}
 	if !strings.Contains(err.Error(), "SMTP não configurado") {
+		t.Errorf("mensagem de erro inesperada: %s", err.Error())
+	}
+}
+
+// TestSendPasswordReset_NoCredentials_Resend garante que retorna erro sem API key.
+func TestSendPasswordReset_NoCredentials_Resend(t *testing.T) {
+	svc := &emailService{
+		provider:     "resend",
+		resendAPIKey: "",
+		appName:      "Portal",
+	}
+
+	err := svc.SendPasswordReset("dest@example.com", "João", "https://example.com/reset")
+	if err == nil {
+		t.Fatal("esperava erro quando RESEND_API_KEY está vazio")
+	}
+	if !strings.Contains(err.Error(), "Resend não configurado") {
 		t.Errorf("mensagem de erro inesperada: %s", err.Error())
 	}
 }
@@ -119,16 +156,10 @@ func TestBuildResetEmail(t *testing.T) {
 		resetURL,
 		"Redefinição de Senha",
 		"15 minutos",
-		"text/html",
 	}
 
-	// O HTML deve conter esses termos
 	for _, term := range checks {
 		if !strings.Contains(html, term) {
-			// "text/html" está no header, não no body — ajusta a busca
-			if term == "text/html" {
-				continue // buildResetEmail retorna só o body HTML, não o header
-			}
 			t.Errorf("HTML gerado não contém '%s'", term)
 		}
 	}
@@ -149,9 +180,6 @@ func TestBuildResetEmail(t *testing.T) {
 // Servidor SMTP fake (in-process) para testar o fluxo de envio completo
 // ---------------------------------------------------------------------------
 
-// startFakeSMTP sobe um servidor TCP mínimo que implementa o protocolo SMTP
-// básico (sem TLS) e captura a mensagem enviada pelo cliente.
-// Retorna o endereço "host:port" e um canal que recebe a mensagem completa.
 func startFakeSMTP(t *testing.T) (host, port string, msgCh <-chan string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -175,12 +203,10 @@ func startFakeSMTP(t *testing.T) (host, port string, msgCh <-chan string) {
 			return strings.TrimSpace(string(buf[:n]))
 		}
 
-		// Saudação inicial
 		write("220 127.0.0.1 SMTP fake server ready")
-		line := readLine() // EHLO ou HELO
+		line := readLine()
 
 		if strings.HasPrefix(strings.ToUpper(line), "EHLO") {
-			// Responde EHLO sem anunciar STARTTLS para forçar caminho sem TLS
 			write("250-127.0.0.1 Hello")
 			write("250-SIZE 10240000")
 			write("250 AUTH PLAIN LOGIN")
@@ -188,11 +214,10 @@ func startFakeSMTP(t *testing.T) (host, port string, msgCh <-chan string) {
 			write("250 127.0.0.1")
 		}
 
-		// Auth
 		authCmd := readLine()
 		if strings.HasPrefix(strings.ToUpper(authCmd), "AUTH") {
 			write("334 ")
-			readLine() // credenciais em base64
+			readLine()
 			write("235 2.7.0 Authentication successful")
 		}
 
@@ -203,7 +228,6 @@ func startFakeSMTP(t *testing.T) (host, port string, msgCh <-chan string) {
 		readLine() // DATA
 		write("354 End data with <CR><LF>.<CR><LF>")
 
-		// Lê o corpo da mensagem até encontrar o terminador "."
 		var body strings.Builder
 		buf := make([]byte, 65536)
 		for {
@@ -229,17 +253,13 @@ func startFakeSMTP(t *testing.T) (host, port string, msgCh <-chan string) {
 	return parts[0], parts[1], ch
 }
 
-// TestSend_FakeSMTP testa o fluxo completo de envio contra um servidor SMTP fake.
-// O smtp.PlainAuth do Go só permite conexões não-TLS para 127.0.0.1/localhost,
-// por isso o servidor fake escuta em 127.0.0.1.
 func TestSend_FakeSMTP(t *testing.T) {
 	host, port, msgCh := startFakeSMTP(t)
 
 	svc := newTestEmailService(host, port, "user@test.com", "pass", "from@test.com", "TestApp")
 
-	err := svc.send("to@test.com", "Assunto Teste", "<p>Corpo do e-mail</p>")
+	err := svc.sendSMTP("to@test.com", "Assunto Teste", "<p>Corpo do e-mail</p>")
 	if err != nil {
-		// Erros de STARTTLS ou auth são esperados em ambientes sem TLS real.
 		t.Logf("ℹ️  send() retornou (esperado em ambiente sem TLS real): %v", err)
 		return
 	}
@@ -263,29 +283,31 @@ func TestSend_FakeSMTP(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Teste de integração real (skipped por padrão; rode com -run Integration)
+// Teste de integração real (skipped por padrão)
 // ---------------------------------------------------------------------------
 
-// TestSendPasswordReset_Integration envia um e-mail de verdade usando as
-// credenciais do arquivo .env. Execute com:
-//
-//	go test -v -run TestSendPasswordReset_Integration ./pkg/services/
-//
-// Defina a variável de ambiente EMAIL_TO para o destinatário.
 func TestSendPasswordReset_Integration(t *testing.T) {
-	if os.Getenv("SMTP_PASSWORD") == "" {
-		t.Skip("SMTP_PASSWORD não configurado — pulando teste de integração")
+	provider := strings.ToLower(os.Getenv("EMAIL_PROVIDER"))
+
+	switch provider {
+	case "smtp":
+		if os.Getenv("SMTP_PASSWORD") == "" {
+			t.Skip("SMTP_PASSWORD não configurado — pulando teste de integração SMTP")
+		}
+	default:
+		if os.Getenv("RESEND_API_KEY") == "" {
+			t.Skip("RESEND_API_KEY não configurado — pulando teste de integração Resend")
+		}
 	}
 
 	to := os.Getenv("EMAIL_TO")
 	if to == "" {
-		to = os.Getenv("SMTP_USERNAME") // auto-envia para si mesmo se não configurado
+		to = os.Getenv("SMTP_USERNAME")
 	}
 	if to == "" {
 		t.Skip("EMAIL_TO e SMTP_USERNAME não configurados — pulando teste de integração")
 	}
 
-	// Carrega credenciais direto das envs (assumindo que foram setadas ou via .env)
 	svc := NewEmailService()
 
 	err := svc.SendPasswordReset(
@@ -296,18 +318,20 @@ func TestSendPasswordReset_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("❌ Falha ao enviar e-mail real: %v", err)
 	}
-	t.Logf("✅ E-mail de redefinição enviado com sucesso para %s", to)
+	t.Logf("✅ E-mail de redefinição enviado com sucesso para %s (provider: %s)", to, provider)
 
-	// Verifica também autenticação via smtp.PlainAuth (sanity check separado)
-	host := os.Getenv("SMTP_HOST")
-	if host == "" {
-		host = "smtp.gmail.com"
-	}
-	user := os.Getenv("SMTP_USERNAME")
-	pass := os.Getenv("SMTP_PASSWORD")
+	// Verifica smtp.PlainAuth apenas para provider SMTP
+	if provider == "smtp" {
+		host := os.Getenv("SMTP_HOST")
+		if host == "" {
+			host = "smtp.gmail.com"
+		}
+		user := os.Getenv("SMTP_USERNAME")
+		pass := os.Getenv("SMTP_PASSWORD")
 
-	auth := smtp.PlainAuth("", user, pass, host)
-	if auth == nil {
-		t.Error("smtp.PlainAuth retornou nil inesperadamente")
+		auth := smtp.PlainAuth("", user, pass, host)
+		if auth == nil {
+			t.Error("smtp.PlainAuth retornou nil inesperadamente")
+		}
 	}
 }
