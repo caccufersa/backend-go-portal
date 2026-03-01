@@ -1,0 +1,10 @@
+# Nunca incluir segredos na imagem Docker
+# As variáveis de ambiente devem ser injetadas via --env-file ou -e no docker run
+.env
+.env.*
+
+# Arquivos de desenvolvimento
+*_test.go
+*.md
+.git
+.gitignore

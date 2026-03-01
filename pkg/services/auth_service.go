@@ -206,7 +206,9 @@ func (s *authService) ForgotPassword(email string) error {
 	go func() {
 		if err := s.emailSvc.SendPasswordReset(user.Email, user.Username, resetURL); err != nil {
 			// Log but don't fail – user can retry
-			fmt.Printf("[AUTH] SendPasswordReset error: %v\n", err)
+			fmt.Printf("[AUTH] SendPasswordReset error for %s: %v\n", user.Email, err)
+		} else {
+			fmt.Printf("[AUTH] Password reset e-mail sent to %s\n", user.Email)
 		}
 	}()
 

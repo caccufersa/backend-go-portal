@@ -55,7 +55,7 @@ func NewEmailService() EmailService {
 
 func (e *emailService) SendPasswordReset(toEmail, username, resetURL string) error {
 	if e.username == "" || e.password == "" {
-		return fmt.Errorf("SMTP não configurado")
+		return fmt.Errorf("SMTP não configurado (SMTP_USERNAME/SMTP_PASSWORD ausentes no ambiente)")
 	}
 
 	subject := fmt.Sprintf("Redefinição de senha – %s", e.appName)
