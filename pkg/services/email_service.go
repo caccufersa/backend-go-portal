@@ -198,73 +198,103 @@ func (e *emailService) buildResetEmail(username, resetURL string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Redefinição de Senha</title>
-  <style>
-    body { margin:0; padding:0; background:#0f172a; font-family:'Segoe UI',system-ui,sans-serif; }
-    .wrapper { max-width:520px; margin:40px auto; padding:0 16px; }
-    .card {
-      background: linear-gradient(135deg,#1e293b 0%%,#0f172a 100%%);
-      border:1px solid #334155;
-      border-radius:16px;
-      overflow:hidden;
-    }
-    .header {
-      background: linear-gradient(135deg,#6366f1 0%%,#8b5cf6 100%%);
-      padding:32px 40px;
-      text-align:center;
-    }
-    .header h1 { margin:0; color:#fff; font-size:22px; font-weight:700; letter-spacing:-0.5px; }
-    .header p  { margin:6px 0 0; color:rgba(255,255,255,0.8); font-size:14px; }
-    .body { padding:36px 40px; }
-    .greeting { color:#e2e8f0; font-size:16px; margin:0 0 16px; }
-    .message  { color:#94a3b8; font-size:14px; line-height:1.7; margin:0 0 28px; }
-    .btn {
-      display:block;
-      width:fit-content;
-      margin:0 auto 28px;
-      padding:14px 36px;
-      background: linear-gradient(135deg,#6366f1,#8b5cf6);
-      color:#fff !important;
-      text-decoration:none;
-      border-radius:10px;
-      font-size:15px;
-      font-weight:600;
-      letter-spacing:0.3px;
-    }
-    .divider { border:none; border-top:1px solid #1e293b; margin:0 0 20px; }
-    .footer-text { color:#475569; font-size:12px; line-height:1.6; margin:0; }
-    .link { color:#6366f1; word-break:break-all; }
-    .expire { color:#f59e0b; font-weight:600; }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redefinição de Senha - %[1]s</title>
+    <style type="text/css">
+        body, table, td, a { -webkit-text-size-adjust: 100%%; -ms-text-size-adjust: 100%%; }
+        table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+        img { -ms-interpolation-mode: bicubic; }
+        img { border: 0; height: auto; line-height: 100%%; outline: none; text-decoration: none; }
+        table { border-collapse: collapse !important; }
+        body { height: 100%% !important; margin: 0 !important; padding: 0 !important; width: 100%% !important; }
+        
+        /* Efeito hover para clientes modernos */
+        .win-button:hover {
+            border-top: 2px solid #000000 !important;
+            border-left: 2px solid #000000 !important;
+            border-bottom: 2px solid #ffffff !important;
+            border-right: 2px solid #ffffff !important;
+            padding: 6px 14px 4px 16px !important; /* Simula o botão sendo pressionado */
+        }
+    </style>
 </head>
-<body>
-  <div class="wrapper">
-    <div class="card">
-      <div class="header">
-        <h1>🔐 Redefinição de Senha</h1>
-        <p>%s</p>
-      </div>
-      <div class="body">
-        <p class="greeting">Olá, <strong>%s</strong>!</p>
-        <p class="message">
-          Recebemos uma solicitação para redefinir a senha da sua conta.<br>
-          Clique no botão abaixo para escolher uma nova senha.<br><br>
-          <strong class="expire">⏱ Este link expira em 15 minutos.</strong>
-        </p>
-        <a href="%s" class="btn">Redefinir Minha Senha</a>
-        <hr class="divider">
-        <p class="footer-text">
-          Se você não solicitou a redefinição de senha, ignore este e-mail — sua conta permanece segura.<br><br>
-          Ou copie e cole este link no seu navegador:<br>
-          <a href="%s" class="link">%s</a>
-        </p>
-      </div>
-    </div>
-  </div>
+<body style="margin: 0; padding: 0; background-color: #008080; font-family: 'MS Sans Serif', Tahoma, Geneva, sans-serif;">
+
+    <table border="0" cellpadding="0" cellspacing="0" width="100%%" style="background-color: #008080; padding: 40px 20px;">
+        <tr>
+            <td align="center">
+                
+                <table border="0" cellpadding="2" cellspacing="0" width="100%%" style="max-width: 450px; background-color: #c0c0c0; border-top: 2px solid #ffffff; border-left: 2px solid #ffffff; border-bottom: 2px solid #000000; border-right: 2px solid #000000;">
+                    <tr>
+                        <td>
+                            
+                            <table border="0" cellpadding="4" cellspacing="0" width="100%%" style="background-color: #000080; border: 1px solid #c0c0c0;">
+                                <tr>
+                                    <td style="color: #ffffff; font-weight: bold; font-size: 13px; font-family: 'MS Sans Serif', Tahoma, sans-serif; letter-spacing: 0.5px;">
+                                        Recuperação_de_Senha.exe
+                                    </td>
+                                    <td align="right" width="20">
+                                        <table border="0" cellpadding="0" cellspacing="0" style="background-color: #c0c0c0; border-top: 1px solid #ffffff; border-left: 1px solid #ffffff; border-bottom: 1px solid #000000; border-right: 1px solid #000000; height: 16px; width: 16px;">
+                                            <tr>
+                                                <td align="center" valign="middle" style="color: #000000; font-size: 10px; font-weight: bold; font-family: Arial, sans-serif; line-height: 1;">
+                                                    X
+                                                </td>
+                                            </tr>
+                                        </table>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <table border="0" cellpadding="15" cellspacing="0" width="100%%">
+                                <tr>
+                                    <td style="color: #000000; font-size: 13px; font-family: 'MS Sans Serif', Tahoma, sans-serif; line-height: 1.5;">
+                                        <p style="margin-top: 0;"><b>Aviso do Sistema para %[2]s:</b></p>
+                                        <p>Uma operação ilegal... brincadeira! Recebemos uma solicitação para redefinir a senha da sua conta no <b>%[1]s</b>.</p>
+                                        <p>Se você não fez essa solicitação, pode ignorar este aviso de segurança com tranquilidade e continuar navegando.</p>
+                                        <p>Para executar a redefinição de senha, por favor clique no botão de comando abaixo (expira em 15 minutos):</p>
+
+                                        <table border="0" cellpadding="0" cellspacing="0" width="100%%" style="margin: 25px 0;">
+                                            <tr>
+                                                <td align="center">
+                                                    <table border="0" cellpadding="0" cellspacing="0" class="win-button" style="background-color: #c0c0c0; border-top: 2px solid #ffffff; border-left: 2px solid #ffffff; border-bottom: 2px solid #000000; border-right: 2px solid #000000;">
+                                                        <tr>
+                                                            <td align="center" style="padding: 5px 15px;">
+                                                                <a href="%[3]s" target="_blank" style="text-decoration: none; color: #000000; font-weight: bold; font-size: 13px; font-family: 'MS Sans Serif', Tahoma, sans-serif; display: block;">
+                                                                    &nbsp;CONFIRMAR REDEFINIÇÃO&nbsp;
+                                                                </a>
+                                                            </td>
+                                                        </tr>
+                                                    </table>
+                                                </td>
+                                            </tr>
+                                        </table>
+
+                                        <hr style="border: none; border-top: 1px solid #808080; border-bottom: 1px solid #ffffff; margin: 20px 0;">
+
+                                        <p style="margin: 0; font-size: 11px; text-align: center; color: #555555;">
+                                            Falha ao executar o comando? Copie e cole este caminho no seu navegador:<br>
+                                            <a href="%[3]s" style="color: #000080; text-decoration: underline; word-break: break-all;">
+                                               %[3]s
+                                            </a>
+                                        </p>
+                                    </td>
+                                </tr>
+                            </table>
+
+                        </td>
+                    </tr>
+                </table>
+                <p style="color: #ffffff; font-size: 11px; font-family: 'MS Sans Serif', Tahoma, sans-serif; text-align: center; margin-top: 20px;">
+                    © 2006-2026 %[1]s. Todos os direitos reservados.
+                </p>
+
+            </td>
+        </tr>
+    </table>
+
 </body>
-</html>`, e.appName, username, resetURL, resetURL, resetURL)
+</html>`, e.appName, username, resetURL)
 }
 
 // ---------------------------------------------------------------------------
