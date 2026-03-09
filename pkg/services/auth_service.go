@@ -41,7 +41,8 @@ type AuthService interface {
 	Register(req models.RegisterRequest, userAgent, ip string) (models.AuthResponse, error)
 	Login(req models.LoginRequest, userAgent, ip string) (models.AuthResponse, error)
 
-	// Email-based password reset
+	// Email-based features
+	VerifyEmail(token string) error
 	ForgotPassword(email string) error
 	ResetPassword(req models.ResetPasswordRequest) error
 
@@ -123,11 +124,11 @@ func (s *authService) Register(req models.RegisterRequest, userAgent, ip string)
 	if err := validatePassword(req.Password); err != nil {
 		return models.AuthResponse{}, err
 	}
-	// Email is optional at registration but must be valid if provided
-	if req.Email != "" {
-		if err := validateEmail(req.Email); err != nil {
-			return models.AuthResponse{}, err
-		}
+	if req.Email == "" {
+		return models.AuthResponse{}, apperror.Validation("e-mail é obrigatório")
+	}
+	if err := validateEmail(req.Email); err != nil {
+		return models.AuthResponse{}, err
 	}
 
 	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
@@ -147,8 +148,28 @@ func (s *authService) Register(req models.RegisterRequest, userAgent, ip string)
 		return models.AuthResponse{}, apperror.Internal("erro ao criar conta")
 	}
 
+	rawToken := generateSecureToken()
+	tokenHash := hashToken(rawToken)
+	expiresAt := time.Now().Add(24 * time.Hour) // 24 hours to verify
+
+	if err := s.repo.CreateEmailVerificationToken(user.ID, tokenHash, expiresAt); err != nil {
+		return models.AuthResponse{}, apperror.Internal("erro ao gerar token de verificação")
+	}
+
+	verifyURL := fmt.Sprintf("%s/auth/verify-email?token=%s", s.frontendURL, rawToken)
+
+	go func() {
+		if err := s.emailSvc.SendEmailVerification(user.Email, user.Username, verifyURL); err != nil {
+			fmt.Printf("[AUTH] SendEmailVerification error for %s: %v\n", user.Email, err)
+		} else {
+			fmt.Printf("[AUTH] Verification e-mail sent to %s\n", user.Email)
+		}
+	}()
+
 	s.setUser(user)
-	return s.createSessionAndRespond(user, userAgent, ip)
+
+	// Return a special message instructing them to verify, NO SESSION CREATED.
+	return models.AuthResponse{User: user}, nil
 }
 
 // ─── Login ──────────────────────────────────────────────────────────────────
@@ -170,6 +191,10 @@ func (s *authService) Login(req models.LoginRequest, userAgent, ip string) (mode
 
 	if err := bcrypt.CompareHashAndPassword([]byte(hashedPw), []byte(req.Password)); err != nil {
 		return models.AuthResponse{}, apperror.Unauthorized("username ou senha incorretos")
+	}
+
+	if !user.IsVerified {
+		return models.AuthResponse{}, apperror.Unauthorized("por favor, verifique seu e-mail antes de fazer login")
 	}
 
 	s.setUser(user)
@@ -256,6 +281,39 @@ func (s *authService) ResetPassword(req models.ResetPasswordRequest) error {
 	s.repo.DeletePasswordResetToken(tokenHash)
 	s.deleteUserCache(userID)
 	s.repo.DeleteAllSessionsByUserID(userID)
+
+	return nil
+}
+
+// ─── Verify Email ────────────────────────────────────────────────────────────
+
+func (s *authService) VerifyEmail(token string) error {
+	if token == "" {
+		return apperror.Validation("token obrigatório")
+	}
+
+	tokenHash := hashToken(token)
+
+	userID, expiresAt, err := s.repo.GetEmailVerificationToken(tokenHash)
+	if err != nil {
+		return apperror.Validation("token inválido ou expirado")
+	}
+
+	expired := subtle.ConstantTimeCompare(
+		[]byte("1"),
+		[]byte(map[bool]string{true: "0", false: "1"}[time.Now().Before(expiresAt)]),
+	) != 1
+	if expired {
+		s.repo.DeleteEmailVerificationToken(tokenHash)
+		return apperror.Validation("token expirado, registre-se novamente")
+	}
+
+	if err := s.repo.VerifyEmail(userID); err != nil {
+		return apperror.Internal("erro ao verificar e-mail")
+	}
+
+	s.repo.DeleteEmailVerificationToken(tokenHash)
+	s.deleteUserCache(userID)
 
 	return nil
 }

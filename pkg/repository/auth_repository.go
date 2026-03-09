@@ -15,6 +15,12 @@ type AuthRepository interface {
 	GetUserByID(id int) (models.User, error)
 	GetUserByUUID(uuid string) (models.User, error)
 	UpdatePassword(userID int, newHashedPassword string) error
+	VerifyEmail(userID int) error
+
+	// Email Verification tokens
+	CreateEmailVerificationToken(userID int, tokenHash string, expiresAt time.Time) error
+	GetEmailVerificationToken(tokenHash string) (userID int, expiresAt time.Time, err error)
+	DeleteEmailVerificationToken(tokenHash string) error
 
 	// Google OAuth
 	GetOrCreateGoogleUser(googleID, email, username, picture string) (models.User, error)
@@ -52,9 +58,9 @@ func (r *authRepository) CreateUser(username, hashedPassword, email string) (mod
 	err := r.db.QueryRow(
 		`INSERT INTO users (username, password, email)
 		 VALUES ($1, $2, NULLIF($3,''))
-		 RETURNING id, uuid, username, COALESCE(email,''), created_at`,
+		 RETURNING id, uuid, username, COALESCE(email,''), is_verified, created_at`,
 		strings.ToLower(username), hashedPassword, email,
-	).Scan(&user.ID, &user.UUID, &user.Username, &emailOut, &user.CreatedAt)
+	).Scan(&user.ID, &user.UUID, &user.Username, &emailOut, &user.IsVerified, &user.CreatedAt)
 	if emailOut.Valid {
 		user.Email = emailOut.String
 	}
@@ -66,10 +72,10 @@ func (r *authRepository) GetUserByUsername(username string) (models.User, string
 	var hashedPw string
 	var email sql.NullString
 	err := r.db.QueryRow(
-		`SELECT id, uuid, username, password, COALESCE(email,''), created_at
+		`SELECT id, uuid, username, password, COALESCE(email,''), is_verified, created_at
 		 FROM users WHERE username = $1`,
 		strings.ToLower(username),
-	).Scan(&user.ID, &user.UUID, &user.Username, &hashedPw, &email, &user.CreatedAt)
+	).Scan(&user.ID, &user.UUID, &user.Username, &hashedPw, &email, &user.IsVerified, &user.CreatedAt)
 	if email.Valid {
 		user.Email = email.String
 	}
@@ -81,10 +87,10 @@ func (r *authRepository) GetUserByEmail(email string) (models.User, string, erro
 	var hashedPw string
 	var pw sql.NullString
 	err := r.db.QueryRow(
-		`SELECT id, uuid, username, COALESCE(password,''), COALESCE(email,''), created_at
+		`SELECT id, uuid, username, COALESCE(password,''), COALESCE(email,''), is_verified, created_at
 		 FROM users WHERE lower(email) = lower($1)`,
 		email,
-	).Scan(&user.ID, &user.UUID, &user.Username, &pw, &user.Email, &user.CreatedAt)
+	).Scan(&user.ID, &user.UUID, &user.Username, &pw, &user.Email, &user.IsVerified, &user.CreatedAt)
 	if pw.Valid {
 		hashedPw = pw.String
 	}
@@ -100,12 +106,12 @@ func (r *authRepository) GetUserByID(id int) (models.User, error) {
 	var user models.User
 	var email, avatar, displayName sql.NullString
 	err := r.db.QueryRow(
-		`SELECT u.id, u.uuid, u.username, COALESCE(u.email,''), u.created_at,
+		`SELECT u.id, u.uuid, u.username, COALESCE(u.email,''), u.is_verified, u.created_at,
 		        COALESCE(sp.avatar_url,''), COALESCE(sp.display_name,'')
 		 FROM users u
 		 LEFT JOIN social_profiles sp ON sp.user_id = u.id
 		 WHERE u.id = $1`, id,
-	).Scan(&user.ID, &user.UUID, &user.Username, &email, &user.CreatedAt, &avatar, &displayName)
+	).Scan(&user.ID, &user.UUID, &user.Username, &email, &user.IsVerified, &user.CreatedAt, &avatar, &displayName)
 	if email.Valid {
 		user.Email = email.String
 	}
@@ -122,12 +128,12 @@ func (r *authRepository) GetUserByUUID(uuid string) (models.User, error) {
 	var user models.User
 	var email, avatar, displayName sql.NullString
 	err := r.db.QueryRow(
-		`SELECT u.id, u.uuid, u.username, COALESCE(u.email,''), u.created_at,
+		`SELECT u.id, u.uuid, u.username, COALESCE(u.email,''), u.is_verified, u.created_at,
 		        COALESCE(sp.avatar_url,''), COALESCE(sp.display_name,'')
 		 FROM users u
 		 LEFT JOIN social_profiles sp ON sp.user_id = u.id
 		 WHERE u.uuid = $1`, uuid,
-	).Scan(&user.ID, &user.UUID, &user.Username, &email, &user.CreatedAt, &avatar, &displayName)
+	).Scan(&user.ID, &user.UUID, &user.Username, &email, &user.IsVerified, &user.CreatedAt, &avatar, &displayName)
 	if email.Valid {
 		user.Email = email.String
 	}
@@ -150,10 +156,10 @@ func (r *authRepository) GetOrCreateGoogleUser(googleID, email, username, pictur
 
 	// 1. Existing Google-linked account
 	err := r.db.QueryRow(
-		`SELECT id, uuid, username, COALESCE(email,''), created_at
+		`SELECT id, uuid, username, COALESCE(email,''), is_verified, created_at
 		 FROM users WHERE google_id = $1`,
 		googleID,
-	).Scan(&user.ID, &user.UUID, &user.Username, &emailOut, &user.CreatedAt)
+	).Scan(&user.ID, &user.UUID, &user.Username, &emailOut, &user.IsVerified, &user.CreatedAt)
 	if err == nil {
 		if emailOut.Valid {
 			user.Email = emailOut.String
@@ -166,11 +172,11 @@ func (r *authRepository) GetOrCreateGoogleUser(googleID, email, username, pictur
 
 	// 2. Account with same email – link the google_id
 	err = r.db.QueryRow(
-		`UPDATE users SET google_id = $1
+		`UPDATE users SET google_id = $1, is_verified = true
 		 WHERE lower(email) = lower($2)
-		 RETURNING id, uuid, username, COALESCE(email,''), created_at`,
+		 RETURNING id, uuid, username, COALESCE(email,''), is_verified, created_at`,
 		googleID, email,
-	).Scan(&user.ID, &user.UUID, &user.Username, &emailOut, &user.CreatedAt)
+	).Scan(&user.ID, &user.UUID, &user.Username, &emailOut, &user.IsVerified, &user.CreatedAt)
 	if err == nil {
 		if emailOut.Valid {
 			user.Email = emailOut.String
@@ -184,13 +190,13 @@ func (r *authRepository) GetOrCreateGoogleUser(googleID, email, username, pictur
 	// 3. Brand new user (no password, Google-only)
 	safeUsername := sanitizeUsername(username)
 	err = r.db.QueryRow(
-		`INSERT INTO users (username, password, email, google_id)
-		 VALUES ($1, '', $2, $3)
+		`INSERT INTO users (username, password, email, google_id, is_verified)
+		 VALUES ($1, '', $2, $3, true)
 		 ON CONFLICT (username) DO UPDATE
 		   SET username = users.username || '_' || substr(md5(random()::text),1,4)
-		 RETURNING id, uuid, username, COALESCE(email,''), created_at`,
+		 RETURNING id, uuid, username, COALESCE(email,''), is_verified, created_at`,
 		safeUsername, email, googleID,
-	).Scan(&user.ID, &user.UUID, &user.Username, &emailOut, &user.CreatedAt)
+	).Scan(&user.ID, &user.UUID, &user.Username, &emailOut, &user.IsVerified, &user.CreatedAt)
 	if emailOut.Valid {
 		user.Email = emailOut.String
 	}
@@ -231,6 +237,39 @@ func sanitizeUsername(s string) string {
 		out = append(out, []rune("user")...)
 	}
 	return string(out)
+}
+
+func (r *authRepository) VerifyEmail(userID int) error {
+	_, err := r.db.Exec(`UPDATE users SET is_verified = true WHERE id = $1`, userID)
+	return err
+}
+
+// ─── Email Verification Tokens ───────────────────────────────────────────────
+
+func (r *authRepository) CreateEmailVerificationToken(userID int, tokenHash string, expiresAt time.Time) error {
+	_, err := r.db.Exec(
+		`INSERT INTO email_verification_tokens (user_id, token_hash, expires_at)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (user_id) DO UPDATE
+		   SET token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
+		userID, tokenHash, expiresAt,
+	)
+	return err
+}
+
+func (r *authRepository) GetEmailVerificationToken(tokenHash string) (int, time.Time, error) {
+	var userID int
+	var expiresAt time.Time
+	err := r.db.QueryRow(
+		`SELECT user_id, expires_at FROM email_verification_tokens WHERE token_hash = $1`,
+		tokenHash,
+	).Scan(&userID, &expiresAt)
+	return userID, expiresAt, err
+}
+
+func (r *authRepository) DeleteEmailVerificationToken(tokenHash string) error {
+	_, err := r.db.Exec(`DELETE FROM email_verification_tokens WHERE token_hash = $1`, tokenHash)
+	return err
 }
 
 // ─── Password Reset Tokens ───────────────────────────────────────────────────

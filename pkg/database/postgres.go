@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS users (
 	password TEXT NOT NULL DEFAULT '',
 	email TEXT,
 	google_id TEXT,
+	is_verified BOOLEAN NOT NULL DEFAULT false,
 	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -151,6 +152,18 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
   expires_at TIMESTAMP NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Email verification tokens
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+  user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL,
+  expires_at TIMESTAMP NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN NOT NULL DEFAULT false;
+-- Mark existing users as verified to not break them
+UPDATE users SET is_verified = true WHERE is_verified = false;
 
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS user_id INT REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS reply_count INT NOT NULL DEFAULT 0;

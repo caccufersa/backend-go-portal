@@ -51,12 +51,25 @@ func (ah *AuthHandler) Register(c *fiber.Ctx) error {
 		return respondErr(c, err)
 	}
 
-	go ah.hub.Broadcast("user_registered", "auth", fiber.Map{
-		"user_id": res.User.ID, "uuid": res.User.UUID, "username": res.User.Username,
+	return c.Status(201).JSON(fiber.Map{
+		"message": "Conta criada com sucesso. Verifique seu e-mail para ativar a conta.",
+		"user":    res.User,
 	})
+}
 
-	ah.setRefreshCookie(c, res.RefreshToken, time.Now().Add(30*24*time.Hour))
-	return c.Status(201).JSON(res)
+// ─── Verify Email ────────────────────────────────────────────────────────────
+
+func (ah *AuthHandler) VerifyEmail(c *fiber.Ctx) error {
+	token := c.Query("token")
+	if token == "" {
+		return c.Status(400).JSON(fiber.Map{"erro": "Token não fornecido"})
+	}
+
+	if err := ah.service.VerifyEmail(token); err != nil {
+		return respondErr(c, err)
+	}
+
+	return c.JSON(fiber.Map{"message": "E-mail verificado com sucesso. Você já pode fazer login."})
 }
 
 // ─── Login ───────────────────────────────────────────────────────────────────

@@ -6,7 +6,8 @@ type User struct {
 	ID          int       `json:"id"`
 	UUID        string    `json:"uuid"`
 	Username    string    `json:"username"`
-	Email       string    `json:"email,omitempty"`
+	Email       string    `json:"email"`
+	IsVerified  bool      `json:"is_verified"`
 	GoogleID    string    `json:"-"` // never expose
 	AvatarURL   string    `json:"avatar_url,omitempty"`
 	DisplayName string    `json:"display_name,omitempty"`
@@ -16,7 +17,11 @@ type User struct {
 type RegisterRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
-	Email    string `json:"email"` // optional but needed for password reset
+	Email    string `json:"email"` // now required
+}
+
+type VerifyEmailRequest struct {
+	Token string `query:"token"`
 }
 
 type LoginRequest struct {

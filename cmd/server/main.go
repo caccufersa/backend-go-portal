@@ -102,12 +102,14 @@ func main() {
 	// ── Auth routes ─────────────────────────────────────────────────────
 	authGroup := app.Group("/auth")
 	authGroup.Post("/register", limiter.New(limiter.Config{
-		Max:        5,
-		Expiration: 1 * time.Minute,
+		Max:        3,
+		Expiration: 24 * time.Hour,
 		KeyGenerator: func(c *fiber.Ctx) string {
 			return c.IP()
 		},
 	}), auth.Register)
+
+	authGroup.Get("/verify-email", auth.VerifyEmail)
 
 	authGroup.Post("/login", limiter.New(limiter.Config{
 		Max:        10,
