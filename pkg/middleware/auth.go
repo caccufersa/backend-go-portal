@@ -11,8 +11,6 @@ import (
 var jwtSecretBytes []byte
 var adminKeyBytes []byte
 
-// InitSecrets must be called once at startup to inject secrets.
-// This avoids reading os.Getenv on every request.
 func InitSecrets(jwtSecret, adminKey string) {
 	jwtSecretBytes = []byte(jwtSecret)
 	adminKeyBytes = []byte(adminKey)
@@ -35,7 +33,6 @@ func parseJWT(tokenStr string) (userID int, userUUID, username string, ok bool) 
 	return userID, userUUID, username, true
 }
 
-// AuthMiddleware requires a valid JWT; returns 401 otherwise.
 func AuthMiddleware(c *fiber.Ctx) error {
 	auth := c.Get("Authorization")
 	if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
@@ -51,9 +48,6 @@ func AuthMiddleware(c *fiber.Ctx) error {
 	return c.Next()
 }
 
-// OptionalAuthMiddleware populates user locals if a valid token is present,
-// but does NOT block the request – useful for public routes with extra info
-// when the user is logged in.
 func OptionalAuthMiddleware(c *fiber.Ctx) error {
 	auth := c.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
@@ -66,7 +60,6 @@ func OptionalAuthMiddleware(c *fiber.Ctx) error {
 	return c.Next()
 }
 
-// AdminMiddleware validates the X-Admin-Key header using constant-time comparison.
 func AdminMiddleware(c *fiber.Ctx) error {
 	provided := []byte(c.Get("X-Admin-Key"))
 	if subtle.ConstantTimeCompare(provided, adminKeyBytes) != 1 {

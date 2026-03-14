@@ -115,8 +115,6 @@ func NewAuthService(repo repository.AuthRepository, emailSvc EmailService, jwtSe
 
 func (s *authService) GetJwtSecret() string { return s.jwtSecret }
 
-// ─── Register ───────────────────────────────────────────────────────────────
-
 func (s *authService) Register(req models.RegisterRequest, userAgent, ip string) (models.AuthResponse, error) {
 	if err := validateUsername(req.Username); err != nil {
 		return models.AuthResponse{}, err
@@ -168,7 +166,6 @@ func (s *authService) Register(req models.RegisterRequest, userAgent, ip string)
 
 	s.setUser(user)
 
-	// Return a special message instructing them to verify, NO SESSION CREATED.
 	return models.AuthResponse{User: user}, nil
 }
 
@@ -184,7 +181,6 @@ func (s *authService) Login(req models.LoginRequest, userAgent, ip string) (mode
 		return models.AuthResponse{}, apperror.Unauthorized("username ou senha incorretos")
 	}
 
-	// Google-only accounts have no password
 	if hashedPw == "" {
 		return models.AuthResponse{}, apperror.Unauthorized("esta conta usa login com Google")
 	}
@@ -194,7 +190,7 @@ func (s *authService) Login(req models.LoginRequest, userAgent, ip string) (mode
 	}
 
 	if !user.IsVerified {
-		return models.AuthResponse{}, apperror.Unauthorized("por favor, verifique seu e-mail antes de fazer login")
+		return models.AuthResponse{}, apperror.Unauthorized("Por favor, verifique seu e-mail antes de fazer login!")
 	}
 
 	s.setUser(user)
@@ -285,8 +281,6 @@ func (s *authService) ResetPassword(req models.ResetPasswordRequest) error {
 	return nil
 }
 
-// ─── Verify Email ────────────────────────────────────────────────────────────
-
 func (s *authService) VerifyEmail(token string) error {
 	if token == "" {
 		return apperror.Validation("token obrigatório")
@@ -318,14 +312,10 @@ func (s *authService) VerifyEmail(token string) error {
 	return nil
 }
 
-// ─── Google OAuth ────────────────────────────────────────────────────────────
-
-// GoogleOAuthURL returns the URL the client should redirect to.
 func (s *authService) GoogleOAuthURL(state string) string {
 	return s.oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
 }
 
-// GoogleCallback exchanges the code, fetches the user profile, and creates a session.
 func (s *authService) GoogleCallback(code, userAgent, ip string) (models.AuthResponse, error) {
 	token, err := s.oauthConfig.Exchange(context.Background(), code)
 	if err != nil {
@@ -350,8 +340,6 @@ func (s *authService) GoogleCallback(code, userAgent, ip string) (models.AuthRes
 	s.setUser(user)
 	return s.createSessionAndRespond(user, userAgent, ip)
 }
-
-// ─── Refresh ────────────────────────────────────────────────────────────────
 
 func (s *authService) Refresh(refreshToken string) (models.AuthResponse, error) {
 	if refreshToken == "" {
@@ -387,8 +375,6 @@ func (s *authService) Refresh(refreshToken string) (models.AuthResponse, error) 
 		ExpiresIn:    int(accessTokenTTL.Seconds()),
 	}, nil
 }
-
-// ─── Session ─────────────────────────────────────────────────────────────────
 
 func (s *authService) Session(tokenStr, refreshToken string) (models.AuthResponse, error) {
 	if tokenStr != "" {
@@ -441,8 +427,6 @@ func (s *authService) Session(tokenStr, refreshToken string) (models.AuthRespons
 	}, nil
 }
 
-// ─── Me ───────────────────────────────────────────────────────────────────────
-
 func (s *authService) Me(userID int) (models.User, error) {
 	if user, ok := s.getUser(userID); ok {
 		return user, nil
@@ -454,8 +438,6 @@ func (s *authService) Me(userID int) (models.User, error) {
 	s.setUser(user)
 	return user, nil
 }
-
-// ─── Logout ───────────────────────────────────────────────────────────────────
 
 func (s *authService) Logout(refreshToken string, userID int) error {
 	if refreshToken != "" {
@@ -496,10 +478,6 @@ func (s *authService) GetUserByUUID(uuid string) (models.User, error) {
 func (s *authService) GetUserByIDObj(userID int) (models.User, bool) {
 	return s.getUser(userID)
 }
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  Internal helpers
-// ═══════════════════════════════════════════════════════════════════════════
 
 func (s *authService) getUser(id int) (models.User, bool) {
 	s.mu.RLock()
@@ -591,7 +569,6 @@ func generateRefreshToken() string {
 	return hex.EncodeToString(b)
 }
 
-// generateSecureToken produces a 32-byte URL-safe hex token for password reset links.
 func generateSecureToken() string {
 	b := make([]byte, 32)
 	rand.Read(b)
@@ -606,7 +583,7 @@ func validateUsername(u string) error {
 		return apperror.Validation("username muito longo (max 30)")
 	}
 	for _, r := range u {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-' {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-' && r != '.' {
 			return apperror.Validation("username só pode ter letras, números, _ e -")
 		}
 	}
