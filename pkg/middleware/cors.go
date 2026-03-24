@@ -6,9 +6,9 @@ import (
 
 func CORSConfig() cors.Config {
 	return cors.Config{
-		AllowOrigins:     "http://localhost:3000,http://localhost:5173,https://portal-cacc-frontend.vercel.app",
+		AllowOrigins:     "http://localhost:3000,http://localhost:5173,https://portal-cacc-frontend.vercel.app,https://capcom.page,https://api.capcom.page",
 		AllowMethods:     "GET,POST,PUT,DELETE,OPTIONS",
-		AllowHeaders:     "Content-Type,Cache-Control,Pragma,Authorization,X-API-Key",
+		AllowHeaders:     "Content-Type,Cache-Control,Pragma,Authorization,X-API-Key,X-Admin-Key",
 		AllowCredentials: true,
 		ExposeHeaders:    "Content-Length,Content-Type",
 		MaxAge:           3600,

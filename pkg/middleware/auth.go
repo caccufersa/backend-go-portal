@@ -1,48 +1,69 @@
 package middleware
 
 import (
-	"os"
+	"crypto/subtle"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
 )
 
-func AuthMiddleware(c *fiber.Ctx) error {
-	tokenStr := ""
-	auth := c.Get("Authorization")
-	if auth != "" {
-		parts := strings.Split(auth, " ")
-		if len(parts) == 2 && parts[0] == "Bearer" {
-			tokenStr = parts[1]
+var jwtSecretBytes []byte
+var adminKeyBytes []byte
+
+func InitSecrets(jwtSecret, adminKey string) {
+	jwtSecretBytes = []byte(jwtSecret)
+	adminKeyBytes = []byte(adminKey)
+}
+
+func parseJWT(tokenStr string) (userID int, userUUID, username string, ok bool) {
+	token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, hmac := t.Method.(*jwt.SigningMethodHMAC); !hmac {
+			return nil, fiber.ErrUnauthorized
 		}
+		return jwtSecretBytes, nil
+	})
+	if err != nil || !token.Valid {
+		return 0, "", "", false
 	}
+	claims := token.Claims.(*jwt.MapClaims)
+	userID = int((*claims)["user_id"].(float64))
+	userUUID, _ = (*claims)["uuid"].(string)
+	username, _ = (*claims)["username"].(string)
+	return userID, userUUID, username, true
+}
 
-	if tokenStr == "" {
-		tokenStr = c.Cookies("access_token")
-	}
-
-	if tokenStr == "" {
+func AuthMiddleware(c *fiber.Ctx) error {
+	auth := c.Get("Authorization")
+	if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
 		return c.Status(401).JSON(fiber.Map{"erro": "Token não informado"})
 	}
-
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		secret = "dev-secret-key-change-in-production"
+	userID, userUUID, username, ok := parseJWT(auth[7:])
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"erro": "Token inválido"})
 	}
+	c.Locals("user_id", userID)
+	c.Locals("user_uuid", userUUID)
+	c.Locals("username", username)
+	return c.Next()
+}
 
-	token, err := jwt.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
-		return []byte(secret), nil
-	})
-
-	if err != nil || !token.Valid {
-		return c.Status(401).JSON(fiber.Map{"erro": "Token inválido ou expirado"})
+func OptionalAuthMiddleware(c *fiber.Ctx) error {
+	auth := c.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		if userID, userUUID, username, ok := parseJWT(auth[7:]); ok {
+			c.Locals("user_id", userID)
+			c.Locals("user_uuid", userUUID)
+			c.Locals("username", username)
+		}
 	}
+	return c.Next()
+}
 
-	claims := token.Claims.(*jwt.MapClaims)
-
-	c.Locals("user_id", int((*claims)["user_id"].(float64)))
-	c.Locals("username", (*claims)["username"].(string))
-
+func AdminMiddleware(c *fiber.Ctx) error {
+	provided := []byte(c.Get("X-Admin-Key"))
+	if subtle.ConstantTimeCompare(provided, adminKeyBytes) != 1 {
+		return c.Status(403).JSON(fiber.Map{"erro": "Acesso negado: Chave administrativa secreta inválida"})
+	}
 	return c.Next()
 }

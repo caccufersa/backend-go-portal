@@ -1,0 +1,122 @@
+services:
+  # MariaDB Database
+  mariadb:
+    image: mariadb:11.3
+    container_name: portal-mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password_change_me}
+      MYSQL_DATABASE: ${DB_NAME:-portal}
+      MYSQL_USER: ${DB_USER:-portal_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-portal_password}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "3307:3306"
+    networks:
+      - portal-network
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: --default-authentication-plugin=mysql_native_password --collation-server=utf8mb4_unicode_ci
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: portal-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - portal-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # API Go
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: portal-api
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      postfix:
+        condition: service_started
+    environment:
+      PORT: 8082
+      DATABASE_URL: ${DB_USER:-portal_user}:${DB_PASSWORD:-portal_password}@tcp(mariadb:3306)/${DB_NAME:-portal}?charset=utf8mb4&parseTime=True&loc=Local
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-change-in-production}
+      ADMIN_SECRET_KEY: ${ADMIN_SECRET_KEY:-change-in-production}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URL: ${GOOGLE_REDIRECT_URL:-}
+      EMAIL_PROVIDER: smtp
+      SMTP_HOST: postfix
+      SMTP_PORT: 587
+      SMTP_USERNAME: ${SMTP_USERNAME:-noreply@capcom.page}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@capcom.page}
+      APP_NAME: ${APP_NAME:-CACC Portal}
+      FRONTEND_URL: ${FRONTEND_URL:-https://capcom.page}
+      GALERIA_PATH: /data/galeria
+    volumes:
+      - galeria_data:/data/galeria
+    ports:
+      - "8082:8082"
+    networks:
+      - portal-network
+    restart: unless-stopped
+
+  # Postfix SMTP (opcional, remova se usar relay externo)
+  postfix:
+    image: boky/postfix:latest
+    container_name: portal-postfix
+    environment:
+      ALLOWED_SENDER_DOMAINS: ${DOMAIN:-capcom.page}
+      RELAY_HOST: ${RELAY_HOST:-}
+      RELAY_PORT: ${RELAY_PORT:-587}
+      RELAY_USERNAME: ${RELAY_USERNAME:-}
+      RELAY_PASSWORD: ${RELAY_PASSWORD:-}
+    volumes:
+      - postfix_data:/var/spool/postfix
+    ports:
+      - "587:587"
+    networks:
+      - portal-network
+    restart: unless-stopped
+
+  # Adminer (UI para MariaDB)
+  adminer:
+    image: adminer:4
+    container_name: portal-adminer
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: mariadb
+    ports:
+      - "8080:8080"
+    networks:
+      - portal-network
+    restart: unless-stopped
+
+volumes:
+  mariadb_data:
+  redis_data:
+  galeria_data:
+  postfix_data:
+
+networks:
+  portal-network:
+    driver: bridge
