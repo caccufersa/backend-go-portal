@@ -3,6 +3,7 @@ package repository
 import (
 	"cacc/pkg/models"
 	"database/sql"
+	"fmt"
 )
 
 type SugestoesRepository interface {
@@ -43,26 +44,38 @@ func (r *sugestoesRepository) Listar() ([]models.Sugestao, error) {
 
 func (r *sugestoesRepository) Criar(texto, author, categoria string) (models.Sugestao, error) {
 	var s models.Sugestao
-	err := r.db.QueryRow(`
+	res, err := r.db.Exec(`
 		INSERT INTO sugestoes (texto, author, categoria)
-		VALUES ($1, $2, $3)
-		RETURNING id, data_criacao
-	`, texto, author, categoria).Scan(&s.ID, &s.CreatedAt)
+		VALUES (?, ?, ?)
+	`, texto, author, categoria)
 	if err != nil {
 		return s, err
 	}
 
+	id, err := res.LastInsertId()
+	if err != nil {
+		return s, fmt.Errorf("falha ao obter id da sugestão criada: %w", err)
+	}
+
+	err = r.db.QueryRow(`
+		SELECT data_criacao FROM sugestoes WHERE id = ?
+	`, id).Scan(&s.CreatedAt)
+	if err != nil {
+		return s, err
+	}
+
+	s.ID = int(id)
 	s.Texto = texto
 	s.Author = author
 	s.Categoria = categoria
 	return s, nil
 }
 func (r *sugestoesRepository) Deletar(id int) error {
-	_, err := r.db.Exec(`DELETE FROM sugestoes WHERE id = $1`, id)
+	_, err := r.db.Exec(`DELETE FROM sugestoes WHERE id = ?`, id)
 	return err
 }
 
 func (r *sugestoesRepository) Atualizar(id int, texto, categoria string) error {
-	_, err := r.db.Exec(`UPDATE sugestoes SET texto = $1, categoria = $2 WHERE id = $3`, texto, categoria, id)
+	_, err := r.db.Exec(`UPDATE sugestoes SET texto = ?, categoria = ? WHERE id = ?`, texto, categoria, id)
 	return err
 }

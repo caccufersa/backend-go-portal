@@ -2,9 +2,6 @@ package apperror
 
 import "fmt"
 
-// Sentinel errors for typed error handling across layers.
-// Handlers switch on these instead of matching raw error strings.
-
 type Code int
 
 const (
@@ -17,15 +14,12 @@ const (
 	ErrInternal     Code = 500
 )
 
-// AppError carries an HTTP-friendly code + user-facing message.
 type AppError struct {
 	Code    Code
 	Message string
 }
 
 func (e *AppError) Error() string { return e.Message }
-
-// Constructors
 
 func Validation(msg string) *AppError   { return &AppError{Code: ErrValidation, Message: msg} }
 func Unauthorized(msg string) *AppError { return &AppError{Code: ErrUnauthorized, Message: msg} }

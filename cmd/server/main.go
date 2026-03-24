@@ -23,7 +23,6 @@ import (
 )
 
 func main() {
-	// ── Secrets (read once, inject everywhere) ──────────────────────────
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
 		jwtSecret = "dev-secret-key-change-in-production"
@@ -36,10 +35,7 @@ func main() {
 		log.Println("[PORTAL] ⚠  ADMIN_SECRET_KEY not set – using dev default")
 	}
 
-	// Inject secrets into middleware (called once)
 	middleware.InitSecrets(jwtSecret, adminKey)
-
-	// ── Database ────────────────────────────────────────────────────────
 	db := database.Connect()
 	defer db.Close()
 
@@ -50,7 +46,6 @@ func main() {
 
 	go cleanExpiredSessions(db)
 
-	// ── Redis ───────────────────────────────────────────────────────────
 	log.Println("[PORTAL] Connecting to Redis...")
 	redis := cache.New()
 	defer redis.Close()
@@ -102,7 +97,7 @@ func main() {
 	// ── Auth routes ─────────────────────────────────────────────────────
 	authGroup := app.Group("/auth")
 	authGroup.Post("/register", limiter.New(limiter.Config{
-		Max:        3,
+		Max:        10,
 		Expiration: 24 * time.Hour,
 		KeyGenerator: func(c *fiber.Ctx) string {
 			return c.IP()

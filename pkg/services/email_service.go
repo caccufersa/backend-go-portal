@@ -5,74 +5,48 @@ import (
 	"fmt"
 	"net/smtp"
 	"os"
-	"strings"
-
-	"github.com/resend/resend-go/v3"
 )
 
-// EmailService sends transactional e-mails.
-// Supports two providers:
-//   - "resend" (default) – uses the Resend HTTP API (works on Render, Heroku, etc.)
-//   - "smtp"            – connects directly via SMTP/STARTTLS (works locally / on VPS)
-//
-// Set EMAIL_PROVIDER=smtp to use SMTP; any other value (or empty) uses Resend.
+// EmailService sends transactional emails via SMTP.
+// All emails are sent through local SMTP server (Postfix in Docker)
+// or external SMTP relay (Gmail, SendGrid, etc)
 type EmailService interface {
 	SendPasswordReset(toEmail, username, resetURL string) error
 	SendEmailVerification(toEmail, username, verifyURL string) error
 }
 
 // ---------------------------------------------------------------------------
-// Shared struct
+// Email service struct
 // ---------------------------------------------------------------------------
 
 type emailService struct {
-	// provider is "resend" or "smtp"
-	provider string
-
-	// SMTP fields
 	host     string
 	port     string
 	username string
 	password string
 	from     string
 	appName  string
-
-	// Resend fields
-	resendAPIKey string
-	resendFrom   string
 }
 
 func NewEmailService() EmailService {
-	provider := strings.ToLower(os.Getenv("EMAIL_PROVIDER"))
-	if provider == "" {
-		provider = "resend"
-	}
-
 	appName := os.Getenv("APP_NAME")
 	if appName == "" {
 		appName = "CACC Portal"
 	}
 
 	svc := &emailService{
-		provider: provider,
 		appName:  appName,
+		host:     envOrDefault("SMTP_HOST", "localhost"),
+		port:     envOrDefault("SMTP_PORT", "587"),
+		username: os.Getenv("SMTP_USERNAME"),
+		password: os.Getenv("SMTP_PASSWORD"),
+		from:     os.Getenv("SMTP_FROM"),
 	}
 
-	switch provider {
-	case "smtp":
-		svc.host = envOrDefault("SMTP_HOST", "smtp.gmail.com")
-		svc.port = envOrDefault("SMTP_PORT", "587")
-		svc.username = os.Getenv("SMTP_USERNAME")
-		svc.password = os.Getenv("SMTP_PASSWORD")
-		svc.from = os.Getenv("SMTP_FROM")
+	if svc.from == "" {
+		svc.from = svc.username
 		if svc.from == "" {
-			svc.from = svc.username
-		}
-	default: // resend
-		svc.resendAPIKey = os.Getenv("RESEND_API_KEY")
-		svc.resendFrom = os.Getenv("RESEND_FROM")
-		if svc.resendFrom == "" {
-			svc.resendFrom = fmt.Sprintf("%s <noreply@capcom.page>", appName)
+			svc.from = fmt.Sprintf("noreply@%s", os.Getenv("DOMAIN"))
 		}
 	}
 
@@ -80,136 +54,92 @@ func NewEmailService() EmailService {
 }
 
 // ---------------------------------------------------------------------------
-// Public method
+// Public methods
 // ---------------------------------------------------------------------------
 
 func (e *emailService) SendPasswordReset(toEmail, username, resetURL string) error {
-	if e.provider == "smtp" {
-		if e.username == "" || e.password == "" {
-			return fmt.Errorf("SMTP não configurado (SMTP_USERNAME/SMTP_PASSWORD ausentes no ambiente)")
-		}
-	} else {
-		if e.resendAPIKey == "" {
-			return fmt.Errorf("Resend não configurado (RESEND_API_KEY ausente no ambiente)")
-		}
-	}
-
 	subject := fmt.Sprintf("Redefinição de senha – %s", e.appName)
 	body := e.buildResetEmail(username, resetURL)
 
-	return e.send(toEmail, subject, body)
+	return e.sendSMTP(toEmail, subject, body)
 }
 
 func (e *emailService) SendEmailVerification(toEmail, username, verifyURL string) error {
-	if e.provider == "smtp" {
-		if e.username == "" || e.password == "" {
-			return fmt.Errorf("SMTP não configurado")
-		}
-	} else {
-		if e.resendAPIKey == "" {
-			return fmt.Errorf("Resend não configurado")
-		}
-	}
-
 	subject := fmt.Sprintf("Verificação de E-mail – %s", e.appName)
 	body := e.buildVerificationEmail(username, verifyURL)
 
-	return e.send(toEmail, subject, body)
+	return e.sendSMTP(toEmail, subject, body)
 }
 
 // ---------------------------------------------------------------------------
-// Send dispatcher
+// SMTP implementation
 // ---------------------------------------------------------------------------
 
-func (e *emailService) send(to, subject, htmlBody string) error {
-	if e.provider == "smtp" {
-		return e.sendSMTP(to, subject, htmlBody)
-	}
-	return e.sendResend(to, subject, htmlBody)
-}
-
-// ---------------------------------------------------------------------------
-// Resend (HTTP API) – works on Render / any cloud
-// ---------------------------------------------------------------------------
-
-func (e *emailService) sendResend(to, subject, htmlBody string) error {
-	client := resend.NewClient(e.resendAPIKey)
-
-	params := &resend.SendEmailRequest{
-		From:    e.resendFrom,
-		To:      []string{to},
-		Subject: subject,
-		Html:    htmlBody,
+func (e *emailService) sendSMTP(to, subject, htmlBody string) error {
+	if e.host == "" || e.port == "" {
+		return fmt.Errorf("SMTP não configurado (SMTP_HOST/SMTP_PORT ausentes no ambiente)")
 	}
 
-	_, err := client.Emails.Send(params)
+	// Prepare message headers
+	headers := fmt.Sprintf("From: <%s>\r\nTo: <%s>\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n", e.from, to, subject)
+	body := headers + htmlBody
+
+	// Connect to SMTP server with STARTTLS
+	addr := fmt.Sprintf("%s:%s", e.host, e.port)
+	conn, err := tls.Dial("tcp", addr, &tls.Config{
+		ServerName: e.host,
+		// InsecureSkipVerify for local testing, remove in production
+		InsecureSkipVerify: false,
+	})
 	if err != nil {
-		return fmt.Errorf("falha ao conectar à API do Resend: %v", err)
+		return fmt.Errorf("falha ao conectar ao servidor SMTP %s: %v", addr, err)
+	}
+	defer conn.Close()
+
+	// Create SMTP client
+	client, err := smtp.NewClient(conn, e.host)
+	if err != nil {
+		return fmt.Errorf("falha ao criar cliente SMTP: %v", err)
+	}
+	defer client.Quit()
+
+	// Authenticate if credentials are provided
+	if e.username != "" && e.password != "" {
+		auth := smtp.PlainAuth("", e.username, e.password, e.host)
+		if err = client.Auth(auth); err != nil {
+			return fmt.Errorf("falha na autenticação SMTP: %v", err)
+		}
+	}
+
+	// Send email
+	if err = client.Mail(e.from); err != nil {
+		return fmt.Errorf("falha ao definir remetente: %v", err)
+	}
+
+	if err = client.Rcpt(to); err != nil {
+		return fmt.Errorf("falha ao definir destinatário: %v", err)
+	}
+
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("falha ao preparar dados: %v", err)
+	}
+
+	_, err = w.Write([]byte(body))
+	if err != nil {
+		return fmt.Errorf("falha ao escrever corpo do email: %v", err)
+	}
+
+	err = w.Close()
+	if err != nil {
+		return fmt.Errorf("falha ao fechar conexão de dados: %v", err)
 	}
 
 	return nil
 }
 
 // ---------------------------------------------------------------------------
-// SMTP (direct) – works locally / on VPS
-// ---------------------------------------------------------------------------
-
-func (e *emailService) sendSMTP(to, subject, htmlBody string) error {
-	addr := e.host + ":" + e.port
-
-	headers := strings.Join([]string{
-		"From: " + e.appName + " <" + e.from + ">",
-		"To: " + to,
-		"Subject: " + subject,
-		"MIME-Version: 1.0",
-		"Content-Type: text/html; charset=UTF-8",
-	}, "\r\n")
-
-	msg := []byte(headers + "\r\n\r\n" + htmlBody)
-
-	auth := smtp.PlainAuth("", e.username, e.password, e.host)
-
-	// Use STARTTLS (port 587) – standard for Gmail App Passwords
-	tlsCfg := &tls.Config{
-		InsecureSkipVerify: false,
-		ServerName:         e.host,
-	}
-
-	conn, err := smtp.Dial(addr)
-	if err != nil {
-		return fmt.Errorf("falha ao conectar ao SMTP: %w", err)
-	}
-	defer conn.Close()
-
-	if ok, _ := conn.Extension("STARTTLS"); ok {
-		if err := conn.StartTLS(tlsCfg); err != nil {
-			return fmt.Errorf("STARTTLS falhou: %w", err)
-		}
-	}
-
-	if err := conn.Auth(auth); err != nil {
-		return fmt.Errorf("autenticação SMTP falhou: %w", err)
-	}
-
-	if err := conn.Mail(e.from); err != nil {
-		return err
-	}
-	if err := conn.Rcpt(to); err != nil {
-		return err
-	}
-
-	wc, err := conn.Data()
-	if err != nil {
-		return err
-	}
-	defer wc.Close()
-
-	_, err = wc.Write(msg)
-	return err
-}
-
-// ---------------------------------------------------------------------------
-// HTML template
+// HTML templates
 // ---------------------------------------------------------------------------
 
 func (e *emailService) buildResetEmail(username, resetURL string) string {
